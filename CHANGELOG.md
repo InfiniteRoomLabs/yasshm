@@ -8,23 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `TESTING.md` `## Manual tests`: live checks the suite must never run go in `<testdir>/manual/` in the agent-ops `manual-test` format and run at release (release-prep Step 4a); the active count is tracked debt
-- `mise.toml` as the single toolchain entry point, with a `check` task and a language-agnostic gate skeleton (`scripts/check.sh`) that ends in a dirty-tree banner
-- `scripts/redaction-check.sh`: public-repo hygiene check against the agent-ops redaction term list; no-op when `REDACTION_TERMS_RESOLVER` is not set
-- LikeC4 tasks (`arch:validate`, `arch:fmt`, `arch:gen`, `arch:dev`) pinned through `pnpm dlx`, and `scripts/arch-gen.sh` with a `--check` mode that fails the gate on stale diagrams
-- CI workflow (`.github/workflows/ci.yml`) running `mise run check` on SHA-pinned actions, with the `pnpm dlx` store cached per `LIKEC4_VERSION`
-- Claude Code harness bootstrap: committed `.claude/settings.json` (marketplaces, default plugins `agency@infinite-room-labs`, `superpowers`, `claude-md-management`, and the `likec4` MCP allowlist) via a `.gitignore` allowlist, `.claude/.gitignore` for local overrides, and a `.claudeignore` that deliberately does not hide `.claude/`
-- `CLAUDE.md` rewritten as the project rulebook (first run, toolchain, working conventions, LikeC4 architecture, key locations, gotchas), plus `AGENTS.md` (Codex pointer), `TESTING.md` (the green rule), `docs/progress.md` (resume anchor), `docs/superpowers/specs/` (where the design spec lands), and an MIT `LICENSE`
-- LikeC4 architecture workspace: `docs/architecture/{likec4.config.json,spec.c4,model.c4,views.c4}` with a seeded model, committed Mermaid exports in `docs/architecture/generated/` spliced into `docs/architecture/README.md`, the `likec4` MCP server in `.mcp.json` (pinned, `pnpm dlx` under the pnpm hardening flags), and a VS Code extension recommendation
-- `SECURITY.md` pointing at GitHub private vulnerability reporting
-- `node` and `pnpm` pinned in `mise.toml` so the LikeC4 gate runs on CI runners that have no global pnpm
+- Design spec for v0.1 (`docs/superpowers/specs/2026-11-18-yasshm-design.md`): locked decisions, verified external facts, component design, security model, testing and release design, deployment contract, and the phase plan
+- `GOAL.md` targeting Phase 0, with a ten-row roadmap, the session-start checklist for a two-repository cloud session, and the hard limits of the build loop (no deploy, no real host, no secret)
+- Phase work orders for the four-lane review gate (`docs/phases/_templates/{implementer,code-review,simplify,security,qa}.md`)
+- LikeC4 model of the planned gateway (`docs/architecture/`): the MCP client, the identity-aware edge, the SSH targets, and the ten yasshm components and datastores, each tagged `#planned` until its phase builds it
+- `scripts/bootstrap.sh`: installs mise and the pinned toolchain on a bare machine; idempotent
+- Go 1.27.4 and golangci-lint 2.15.0 pinned in `mise.toml`
 
 ### Changed
 
-- `.gitignore` now ignores secret and tool wiring (`fnox.toml`, `mise.local.toml`, `.env*`, `.envrc`), `.worktrees/`, and build output, and allowlists the committed `.claude/` files instead of ignoring the directory
-- The GOAL treadmill is installed by running `/new-goal-loop` (agent-ops), not vendored: the template ships only `docs/progress.md`
-
-### Removed
-
-- Spec Kitty entirely (`.kittify/`, the 14 `/spec-kitty.*` commands, the `/init` prompt): never used past init in any repo cut from this template, and already removed from agent-ops and infra
-- Untested structure scaffolding from the March 2026 layout: `src/*/CLAUDE.md`, `docs/decisions/`, `docs/runbooks/`, `tools/{scripts,prompts}/`, local `.claude/skills/`
+- Template placeholders replaced with the project's name and description in `README.md`, `CLAUDE.md`, `AGENTS.md`, `TESTING.md`, `docs/progress.md` and the architecture workspace; the "Using this template" checklist is done and removed
+- `CLAUDE.md` is now the yasshm rulebook: the integration branch `feat/yasshm-mvp`, the two-repository rules, the hard limits, and the cloud-session gotchas
+- CI runs the gate on pushes to `feat/**` and `phase-*/**` as well as `main` and pull requests

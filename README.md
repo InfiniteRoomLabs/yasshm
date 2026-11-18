@@ -1,36 +1,41 @@
-# <project>
+# yasshm
 
-<one-line-description>
+Yet Another SSH MCP: a self-hosted MCP gateway that lets an AI assistant run policy-checked, audited commands on SSH hosts you have configured.
 
 MIT licensed. Built by [Infinite Room Labs](https://github.com/InfiniteRoomLabs).
 
-## Install / run
+## Status
+
+Planned, not built. There is no product code yet and nothing to install. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). Work happens on the `feat/yasshm-mvp` branch until the first release.
+
+## What v0.1 will be
+
+- One static Go binary, run by systemd on a host you control, listening on loopback only.
+- Reached through an identity-aware edge (Cloudflare Tunnel plus Access); yasshm verifies the edge's signed token on every request.
+- Eight MCP tools over Streamable HTTP: `list_servers`, `run_command`, `read_output`, `list_commands`, `kill_command`, `get_server_info`, `upload_file`, `download_file`.
+- Read-only by construction: commands run as an unprivileged account on the target, behind a denylist. Write access is designed in and switched off.
+- Job control for commands that outlive a tool call, and an append-only audit log of everything asked and done.
+
+The denylist is a guard rail, not a sandbox: what a command can change is decided by the account it runs as. Read the security model in the spec (section 6) before pointing this at a machine you care about.
+
+## Develop
 
 ```sh
-git clone https://github.com/InfiniteRoomLabs/<repo>.git
-cd <repo>
-mise install
+git clone https://github.com/InfiniteRoomLabs/yasshm.git
+cd yasshm
+scripts/bootstrap.sh   # installs mise if needed, then the pinned toolchain
 mise run check
 ```
 
 ## Architecture
 
-The architecture is modelled as code with [LikeC4](https://likec4.dev) in `docs/architecture/`. The landscape view is rendered in [docs/architecture/README.md](docs/architecture/README.md); `mise run arch:dev` opens the interactive version.
+The architecture is modelled as code with [LikeC4](https://likec4.dev) in `docs/architecture/`. The landscape view is rendered in [docs/architecture/README.md](docs/architecture/README.md); `mise run arch:dev` opens the interactive version. Components tagged `#planned` are designed but not built yet.
 
 ## Contributing
 
-- Toolchain via [mise](https://mise.jdx.dev/): `mise install`. `<toolchain>`.
+- Toolchain via [mise](https://mise.jdx.dev/): `scripts/bootstrap.sh` or `mise install`. Go and golangci-lint are pinned in `mise.toml`; Node and pnpm are there only for LikeC4.
 - The gate: `mise run check`. See `TESTING.md` for the testing rules.
 - Commits: [Conventional Commits](https://www.conventionalcommits.org/), imperative mood, scoped.
-- If you use Claude Code, install the [agent-ops marketplace](https://github.com/InfiniteRoomLabs/agent-ops) -- it provides the changelog guard that keeps `CHANGELOG.md` honest and the `/new-goal-loop` skill this repo is built with.
+- If you use Claude Code, install the [agent-ops marketplace](https://github.com/InfiniteRoomLabs/agent-ops) -- it provides the changelog guard that keeps `CHANGELOG.md` honest and the goal loop this repo is built with (`GOAL.md`).
 - `scripts/redaction-check.sh` (a pre-commit hygiene check) is optional for outside contributors; it no-ops when `REDACTION_TERMS_RESOLVER` is not set.
-
-## Using this template (delete this section after cutting a new repo)
-
-1. Replace every placeholder: `<project>`, `<one-line-description>`, `<toolchain>`, `<gate-steps>`, `<repo>`, `<slug>`. Verify with `grep -rEn '<(project|one-line-description|toolchain|gate-steps|repo|slug)>' --exclude-dir=.git .` -- it must print nothing. (Angle-bracket notation like `<cmd>` in CLAUDE.md, and the per-phase slots in `docs/progress.md`, are not placeholders.)
-2. Pin the real toolchain in `mise.toml [tools]`.
-3. Fill in `scripts/check.sh`: one `run_<step>` per gate step, list them in `steps`, wire them into `run_step`. Verify `mise run check` is green.
-4. Describe the system in `docs/architecture/model.c4` (and `spec.c4`/`views.c4` as needed), then `mise run arch:gen` and commit the regenerated diagrams.
-5. Truncate `CHANGELOG.md` to an empty `[Unreleased]` section.
-6. Run `/new-goal-loop <what you are building>` in Claude Code to produce `GOAL.md`, the design spec, and the phase work orders.
-7. Delete this section.
+- Security reports: see `SECURITY.md`.

@@ -1,6 +1,10 @@
-# TESTING.md -- how <project> tests
+# TESTING.md -- how yasshm tests
 
-Referenced from `CLAUDE.md` and `README.md`. This is the single source of truth for **how we test**; the concrete steps are the ones `scripts/check.sh` runs (`<gate-steps>`).
+Referenced from `CLAUDE.md` and `README.md`. This is the single source of truth for **how we test**; the concrete steps are the ones `scripts/check.sh` runs. Today that is `arch` only. Phase 0 of the roadmap adds `fmt`, `lint`, `skipcheck`, `test`, `cover`, `vuln` and `build`, and rewrites this sentence to match. How the rules below apply to this project (the layers, the test support packages, the scenarios) is spec section 7 (`docs/superpowers/specs/2026-11-18-yasshm-design.md`).
+
+## What gets an automated test, and what cannot
+
+Everything that can run without the real edge, a real target host or a secret gets an automated test in the gate: unit, integration and end to end. No test reaches the network, a real host or a credential. What cannot be automated under those limits is a manual test (last section), run by the operator and never by the build loop.
 
 ## The green rule -- always run green, never ignore, never silence
 
@@ -19,7 +23,7 @@ Bias toward the cheapest layer that can catch the bug: unit and functional tests
 
 ## Path taxonomy
 
-Tag test names so triage can grep them. A feature is not done until every applicable tag is covered.
+Tag test names so triage can grep them. A feature is not done until every applicable tag is covered. In Go the tag is the first element of the subtest name (`t.Run("sad/unknown key", ...)`), so `go test -run '/sad/'` selects a class.
 
 | Tag | Covers |
 |---|---|
@@ -31,8 +35,8 @@ Tag test names so triage can grep them. A feature is not done until every applic
 
 ## Coverage
 
-Set a floor and enforce it in the gate (`scripts/check.sh`), not in promises. Excluding files from the measurement is a design decision: flag it in the same commit and keep the excluded set tiny (an entrypoint with one statement, not "everything hard to test").
+Set a floor and enforce it in the gate (`scripts/check.sh`), not in promises. Excluding files from the measurement is a design decision: flag it in the same commit and keep the excluded set tiny (an entrypoint with one statement, not "everything hard to test"). For yasshm the floor is 85% of statements across all packages, and the only exclusion is the test support code in `internal/testkit/` (spec section 7).
 
 ## Manual tests
 
-Live checks the suite must never run are manual tests in `<testdir>/manual/` (the directory the automated tests use), one `MT-<nnn>-<slug>.md` beside its `.results` log, in the agent-ops `manual-test` format: one tool call per step, a `jq -e` or exact-shape expected result, a declared read budget, placeholders resolved from the gitignored `mise.local.toml`. They run at release (release-prep Step 4a) and a FAIL refuses the tag. Each names what blocks its automation; the count of active files is tracked debt. Active: none yet.
+Live checks the suite must never run are manual tests in `test/manual/`, one `MT-<nnn>-<name>.md` beside its `.results` log, in the agent-ops `manual-test` format: one tool call per step, a `jq -e` or exact-shape expected result, a declared read budget, placeholders resolved from the gitignored `mise.local.toml`. They run at release (release-prep Step 4a) and a FAIL refuses the tag. Each names what blocks its automation; the count of active files is tracked debt. Active: none yet. Planned for Phase 7: MT-001 to MT-005 (spec section 7), each blocked on the same thing -- they need the real edge and a real target, which the build loop never has.
