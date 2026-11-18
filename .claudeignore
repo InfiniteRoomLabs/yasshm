@@ -1,0 +1,42 @@
+# Paths not worth scanning by AI assistants.
+# NOTE: `.claude/` is deliberately NOT ignored -- it holds hand-authored,
+# load-bearing config (settings.json) and any project-local skills.
+
+# Other agents' working dirs (also gitignored)
+.codex/
+.gemini/
+.cursor/
+.qwen/
+.opencode/
+.windsurf/
+.kilocode/
+.augment/
+.roo/
+.amazonq/
+.github/copilot/
+
+# Git metadata
+.git/
+
+# Build artifacts, caches, environments
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+build/
+.venv/
+venv/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs and databases
+*.log
+*.db
+*.sqlite
