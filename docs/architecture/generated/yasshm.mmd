@@ -1,0 +1,35 @@
+---
+title: "Inside yasshm"
+---
+graph TB
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
+  Edge@{ shape: rectangle, label: "Identity-aware edge" }
+  subgraph Yasshm["`yasshm`"]
+    Yasshm.Http@{ shape: rectangle, label: "MCP endpoint" }
+    Yasshm.Auth@{ shape: rectangle, label: "Authenticator" }
+    Yasshm.Tools@{ shape: rectangle, label: "Tool handlers" }
+    Yasshm.Policy@{ shape: rectangle, label: "Policy engine" }
+    Yasshm.Jobs@{ shape: rectangle, label: "Job engine" }
+    Yasshm.Audit@{ shape: disk, label: "Audit log" }
+    Yasshm.Ssh@{ shape: rectangle, label: "SSH client" }
+    Yasshm.Store@{ shape: disk, label: "Job store" }
+    Yasshm.Outputs@{ shape: disk, label: "Output store" }
+    Yasshm.Config@{ shape: rectangle, label: "Config loader" }
+  end
+  Targets@{ shape: rectangle, label: "SSH target hosts" }
+  Operator -. "`writes on the host`" .-> Yasshm.Config
+  Operator -. "`reads`" .-> Yasshm.Audit
+  Edge -. "`forwards with a signed identity token`" .-> Yasshm.Http
+  Yasshm.Http -. "`verifies every request`" .-> Yasshm.Auth
+  Yasshm.Http -. "`dispatches tool calls`" .-> Yasshm.Tools
+  Yasshm.Auth -. "`reads the identity mapping`" .-> Yasshm.Config
+  Yasshm.Tools -. "`checks grant, access level and denylist`" .-> Yasshm.Policy
+  Yasshm.Tools -. "`submits and queries commands`" .-> Yasshm.Jobs
+  Yasshm.Tools -. "`appends one event per call`" .-> Yasshm.Audit
+  Yasshm.Policy -. "`reads tenants, grants and rules`" .-> Yasshm.Config
+  Yasshm.Jobs -. "`runs commands and transfers files`" .-> Yasshm.Ssh
+  Yasshm.Jobs -. "`records command state`" .-> Yasshm.Store
+  Yasshm.Jobs -. "`streams captured output`" .-> Yasshm.Outputs
+  Yasshm.Ssh -. "`reads server definitions`" .-> Yasshm.Config
+  Yasshm.Auth -. "`fetches signing keys`" .-> Edge
+  Yasshm.Ssh -. "`SSH with pinned host keys`" .-> Targets

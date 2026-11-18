@@ -1,24 +1,111 @@
-// The logical architecture of <project>. Rename the `project` id to your slug.
+// The logical architecture of yasshm.
 // One element per thing that can fail independently or be owned separately.
 // A structural change to the code updates this file in the same commit.
+// Elements tagged #planned are designed (see the design spec) but not built
+// yet: the phase that builds one removes the tag in the same commit.
 model {
-  user = actor 'User' {
-    description 'The person <project> serves'
+  operator = actor 'Operator' {
+    description 'Owns the target hosts, writes the server-side config, reads the audit log'
   }
 
-  project = system '<project>' {
-    description '<one-line-description>'
-
-    api = component 'API' {
-      technology 'TODO'
-    }
-
-    store = datastore 'Datastore' {
-      technology 'TODO'
-    }
-
-    api -> store 'reads and writes'
+  assistant = system 'MCP client' {
+    #external
+    description 'An AI assistant app that speaks MCP over Streamable HTTP and signs the user in with OAuth'
   }
 
-  user -> api 'calls'
+  edge = system 'Identity-aware edge' {
+    #external
+    technology 'Cloudflare Tunnel + Access'
+    description 'Public HTTPS entry point that authenticates the caller and forwards each request with a signed identity token'
+  }
+
+  targets = system 'SSH target hosts' {
+    #external
+    technology 'OpenSSH'
+    description 'Machines the operator has configured yasshm to reach'
+  }
+
+  yasshm = system 'yasshm' {
+    description 'Self-hosted MCP gateway that runs policy-checked, audited commands on configured SSH hosts'
+
+    http = component 'MCP endpoint' {
+      #planned
+      technology 'Go net/http, MCP Go SDK, Streamable HTTP'
+      description 'Serves the MCP protocol, health checks and graceful shutdown'
+    }
+
+    auth = component 'Authenticator' {
+      #planned
+      technology 'Access JWT verification against a cached JWKS'
+      description 'Turns a request into a principal and a tenant, or rejects it'
+    }
+
+    tools = component 'Tool handlers' {
+      #planned
+      technology 'MCP tools'
+      description 'The eight tools: list_servers, run_command, read_output, list_commands, kill_command, get_server_info, upload_file, download_file'
+    }
+
+    policy = component 'Policy engine' {
+      #planned
+      technology 'Go'
+      description 'Tenant grants, access levels, command denylist and size limits'
+    }
+
+    jobs = component 'Job engine' {
+      #planned
+      technology 'Go, in-process queue'
+      description 'Command lifecycle: queue, run, time out, kill, recover after restart'
+    }
+
+    ssh = component 'SSH client' {
+      #planned
+      technology 'golang.org/x/crypto/ssh, SFTP'
+      description 'Pinned host keys, command execution, file transfer'
+    }
+
+    config = component 'Config loader' {
+      #planned
+      technology 'YAML file on the host'
+      description 'Servers, tenants, grants and rules. Never readable or writable through MCP'
+    }
+
+    store = datastore 'Job store' {
+      #planned
+      technology 'SQLite'
+      description 'Command records, tenant-scoped'
+    }
+
+    outputs = datastore 'Output store' {
+      #planned
+      technology 'Files on disk'
+      description 'Captured stdout and stderr per command, with retention'
+    }
+
+    audit = datastore 'Audit log' {
+      #planned
+      technology 'Append-only JSONL'
+      description 'One event per tool call, command and auth decision'
+    }
+
+    http -> auth 'verifies every request'
+    http -> tools 'dispatches tool calls'
+    tools -> policy 'checks grant, access level and denylist'
+    tools -> jobs 'submits and queries commands'
+    tools -> audit 'appends one event per call'
+    jobs -> ssh 'runs commands and transfers files'
+    jobs -> store 'records command state'
+    jobs -> outputs 'streams captured output'
+    auth -> config 'reads the identity mapping'
+    policy -> config 'reads tenants, grants and rules'
+    ssh -> config 'reads server definitions'
+  }
+
+  operator -> assistant 'asks for work'
+  operator -> yasshm.config 'writes on the host'
+  operator -> yasshm.audit 'reads'
+  assistant -> edge 'MCP over HTTPS with OAuth'
+  edge -> yasshm.http 'forwards with a signed identity token'
+  yasshm.auth -> edge 'fetches signing keys'
+  yasshm.ssh -> targets 'SSH with pinned host keys'
 }

@@ -1,4 +1,4 @@
-// Element and relationship kinds for <project>.
+// Element and relationship kinds for yasshm.
 // Every kind used in model.c4 must be declared here. Keep this file small and
 // stable: a change here forces a full re-parse of the workspace.
 specification {
@@ -21,6 +21,11 @@ specification {
   }
 
   tag external
+  // Designed in the spec but not built yet. The phase that builds an element
+  // removes this tag in the same commit.
+  tag planned {
+    color #78909c
+  }
   tag deprecated {
     color #9e9e9e
   }

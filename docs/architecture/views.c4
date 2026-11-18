@@ -3,11 +3,15 @@ views {
   view index {
     title 'Landscape'
     include *
+    include
+      operator -> yasshm with {
+        title 'configures and audits on the host'
+      }
     autoLayout LeftRight
   }
 
-  view project of project {
-    title 'Inside <project>'
+  view yasshm of yasshm {
+    title 'Inside yasshm'
     include *
   }
 }

@@ -1,6 +1,6 @@
 # Architecture
 
-The architecture of <project> is modelled as code with [LikeC4](https://likec4.dev). Sources live beside this file (`spec.c4`, `model.c4`, `views.c4`); the LikeC4 workspace is the repo root and this directory is the project (`likec4.config.json`).
+The architecture of yasshm is modelled as code with [LikeC4](https://likec4.dev). Sources live beside this file (`spec.c4`, `model.c4`, `views.c4`); the LikeC4 workspace is the repo root and this directory is the project (`likec4.config.json`).
 
 ## Landscape
 
@@ -12,9 +12,17 @@ The block below is generated from `views.c4` by `mise run arch:gen` -- do not ed
 title: "Landscape"
 ---
 graph LR
-  User@{ icon: "fa:user", shape: rounded, label: "User" }
-  Project@{ shape: rectangle, label: "<project>" }
-  User -. "`calls`" .-> Project
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
+  Assistant@{ shape: rectangle, label: "MCP client" }
+  Edge@{ shape: rectangle, label: "Identity-aware edge" }
+  Yasshm@{ shape: rectangle, label: "yasshm" }
+  Targets@{ shape: rectangle, label: "SSH target hosts" }
+  Operator -. "`asks for work`" .-> Assistant
+  Operator -. "`configures and audits on the host`" .-> Yasshm
+  Assistant -. "`MCP over HTTPS with OAuth`" .-> Edge
+  Edge -. "`forwards with a signed identity token`" .-> Yasshm
+  Yasshm -. "`fetches signing keys`" .-> Edge
+  Yasshm -. "`SSH with pinned host keys`" .-> Targets
 ```
 <!-- arch:index:end -->
 
@@ -23,6 +31,7 @@ Every view is also exported to `generated/<view>.mmd`.
 ## Workflow
 
 - **Change the model with the code.** A new service, datastore, or relationship is not done until it is in `model.c4` in the same commit.
+- **`#planned` means designed, not built.** The whole v0.1 system is in the model from the start (the design spec, section 4, is its index). The phase that builds an element removes its `#planned` tag in the same commit.
 - **Regenerate and commit:** `mise run arch:gen`, then commit `generated/` and this README together with the change. `mise run check` fails when they are stale.
 - **Validate and format:** `mise run arch:validate`, `mise run arch:fmt`.
 - **Browse:** `mise run arch:dev` (live reload at http://localhost:5173). The VS Code extension `likec4.likec4-vscode` (recommended in `.vscode/extensions.json`) gives inline validation, previews, and safe renames.

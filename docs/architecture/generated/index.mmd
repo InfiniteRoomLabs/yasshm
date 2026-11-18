@@ -2,6 +2,14 @@
 title: "Landscape"
 ---
 graph LR
-  User@{ icon: "fa:user", shape: rounded, label: "User" }
-  Project@{ shape: rectangle, label: "<project>" }
-  User -. "`calls`" .-> Project
+  Operator@{ icon: "fa:user", shape: rounded, label: "Operator" }
+  Assistant@{ shape: rectangle, label: "MCP client" }
+  Edge@{ shape: rectangle, label: "Identity-aware edge" }
+  Yasshm@{ shape: rectangle, label: "yasshm" }
+  Targets@{ shape: rectangle, label: "SSH target hosts" }
+  Operator -. "`asks for work`" .-> Assistant
+  Operator -. "`configures and audits on the host`" .-> Yasshm
+  Assistant -. "`MCP over HTTPS with OAuth`" .-> Edge
+  Edge -. "`forwards with a signed identity token`" .-> Yasshm
+  Yasshm -. "`fetches signing keys`" .-> Edge
+  Yasshm -. "`SSH with pinned host keys`" .-> Targets
