@@ -3,7 +3,10 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # `feat/**` is where a multi-phase build integrates before it reaches main;
+    # `phase-*/**` are the per-phase branches of the GOAL treadmill. Running the
+    # gate on every push to them means "CI green" never needs a pull request.
+    branches: [main, "feat/**", "phase-*/**"]
   workflow_call:
 
 permissions:

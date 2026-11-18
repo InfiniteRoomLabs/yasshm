@@ -8,9 +8,9 @@ usage = "6.0.0"
 # node + pnpm are required by the LikeC4 tasks (`pnpm dlx`), on CI too.
 node = "24.14.0"
 pnpm = "11.4.0"
-# Pin the rest of this project's toolchain here, e.g.:
-# go = "1.26.6"
-# python = "3.13"
+# The project toolchain. Phase 0 wires these into scripts/check.sh.
+go = "1.27.4"
+golangci-lint = "2.15.0"
 
 [env]
 # LikeC4 is not in the mise registry, so it is invoked through `pnpm dlx` and
