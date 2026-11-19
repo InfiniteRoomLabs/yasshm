@@ -28,7 +28,7 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 |---|---|---|---|
 | 0 Scaffold | SHIPPED | `34d6001` .. the commit `docs(phase-0): ship scaffold` | Gate: code review REQUEST CHANGES (1 blocking), security PASS, QA NEEDS WORK on the same blocker; fixed in `27e6c67`; gate and CI green after it. Coverage 95.2 percent |
 | 1 Config, tenants, policy, audit | SHIPPED | `6cc1f31` .. the commit `docs(phase-1): ship config, tenants, policy, audit` | Gate: code review REQUEST CHANGES (2 blocking), security BLOCK (1 blocking), QA NEEDS WORK (reproduced all three, found a fourth); fixed in `c92a45f`; the lead's probe of that fix found a regression, fixed in `9422125`; gate and CI green after it. Coverage 95.9 percent. YAML library: `go.yaml.in/yaml/v3` (F18) |
-| 2 SSH layer | not started | -- | Next |
+| 2 SSH layer | in progress | base: the commit `docs(phase-2): start ssh layer` | Premise: gate and CI green on the Phase 1 ship commit; F10 read in the sources; the real-`sshd` lane is CI-only |
 | 3 Jobs, store, outputs | not started | -- | |
 | 4 Authenticator | not started | -- | |
 | 5 MCP endpoint and tools | not started | -- | |
