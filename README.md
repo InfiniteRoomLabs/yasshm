@@ -6,7 +6,7 @@ MIT licensed. Built by [Infinite Room Labs](https://github.com/InfiniteRoomLabs)
 
 ## Status
 
-Early scaffold. The module builds a `yasshm` binary with a `version` subcommand and the full gate is in place; the gateway itself is not built yet and there is nothing to deploy. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
+Under construction. The binary has `version` and `config check --config <file>`, which validates a config file strictly (every problem reported at once, one line each) and checks its private key and known_hosts files without connecting anywhere. Built so far: the tenant model (`internal/tenant`), the config loader (`internal/config`), the policy engine with its command and path guard rails (`internal/policy`) and the append-only audit log (`internal/audit`). The SSH layer, jobs, authentication and the MCP endpoint come next, so there is still nothing to deploy. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
 
 ## What v0.1 will be
 

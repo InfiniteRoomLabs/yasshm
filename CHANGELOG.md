@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `mise run build` (`scripts/build.sh`: linux amd64 and arm64, `CGO_ENABLED=0`, `-trimpath`, `dist/SHA256SUMS`), `mise run test`, `mise run lint`, `mise run fuzz` (`scripts/fuzz.sh`)
 - `mise run build` is reproducible: the build date is `SOURCE_DATE_EPOCH` or the commit time, and a `VERSION` override is validated
 - CI ensures `sshd` is installed on the runner and fails if it is not; `scripts/bootstrap.sh` and the gate report whether `sshd` is present locally (the real-sshd lane is CI-only, spec section 7)
+- `internal/tenant`: the shared domain types (`TenantID`, `ServerID`, `CommandID`, `Principal`, `AccessLevel` ordered none < look < full, `Server` with `IdentityFor`, `Identity`, `PrincipalMatch`, `Policy`, `Limits`); `tenant.Permits` is the one place access levels are compared
+- `internal/config`: strict loading of the YAML config (spec 5.1) with every problem reported in one pass as `path.to.key: message (line N)`, the limits table with defaults, allowed ranges and cross-field rules, `MaxTenants = 1`, and private key and known_hosts checks that never echo key material
+- `internal/policy`: `Engine.Decide` with the `not_found`, `access_denied` and `policy_denied` checks in order, the built-in command and path denylists with a named rule per entry, and the operator's `deny_commands` and `deny_paths`
+- `internal/audit`: the append-only JSONL audit log (`O_APPEND`, mode 0600, one write and one sync per event, UTC timestamps), a typed constructor for every event of spec 5.4, and `Logger.Before` for audit-before-act
+- `yasshm config check --config <file>`: exit 0 when valid, 1 with the problem lines, 2 for a usage error
+- Fuzz targets for the config decoder and the command and path guard rails; `internal/deprule` enforces the package dependency rule of spec section 4; `internal/testkit/configtest` writes synthetic configs for tests
+- Dependencies: `go.yaml.in/yaml/v3` v3.0.6 and `golang.org/x/crypto` v0.59.0
 
 ### Changed
 
