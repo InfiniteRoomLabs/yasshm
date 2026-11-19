@@ -38,7 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Command rails skip a quoted span only when it opens and closes on one line, and every line start is a command start, so a quote in a comment or here-doc cannot hide a later line
 - `mise run fuzz` passes `-fuzzminimizetime 1s` so the 30 seconds go to fuzzing, not minimizing
 
-- `GOAL.md` targets Phase 1; `docs/progress.md` records Phase 0 as shipped
+- `GOAL.md` targets Phase 2; `docs/progress.md` records Phases 0 and 1 as shipped
 - A dirty working tree now fails the gate (`scripts/check.sh` exits 1) instead of printing a banner
 - `TESTING.md`, `CLAUDE.md` and `README.md` describe the gate as it now is
 - Template placeholders replaced with the project's name and description in `README.md`, `CLAUDE.md`, `AGENTS.md`, `TESTING.md`, `docs/progress.md` and the architecture workspace; the "Using this template" checklist is done and removed

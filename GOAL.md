@@ -2,7 +2,7 @@
 
 One cloud session, one orchestrator, both repositories. It is started once with the kickoff prompt below and ships the approved roadmap one phase at a time through the pipeline: verify premise -> implement -> four-lane review gate -> ship -> retarget this file -> next phase. The design oracle is `docs/superpowers/specs/2026-11-18-yasshm-design.md` (the "spec"); `CLAUDE.md` holds the conventions and dispatch rules; `docs/progress.md` is where we are.
 
-**Shipped so far:** Phase 0 (Scaffold): the Go module with `version`, the full gate, the `mise` tasks, CI with `sshd` on the runner, and the sandbox facts settled. Next target: **Phase 1 (Config, tenants, policy, audit)**. Full roadmap in *Retarget* at the bottom.
+**Shipped so far:** Phase 0 (Scaffold): the Go module with `version`, the full gate, the `mise` tasks, CI with `sshd` on the runner, and the sandbox facts settled. Phase 1 (Config, tenants, policy, audit): `internal/tenant`, `internal/config`, `internal/policy`, `internal/audit`, `internal/keyfile` and `yasshm config check`. Next target: **Phase 2 (SSH layer)**. Full roadmap in *Retarget* at the bottom.
 
 ## Kickoff
 
@@ -47,31 +47,31 @@ A cloud session can count on pushing exactly one branch per repository: its work
 
 ---
 
-## Goal (current target: Phase 1 -- Config, tenants, policy, audit)
+## Goal (current target: Phase 2 -- SSH layer)
 
-> **Goal -- ship Phase 1 (Config, tenants, policy, audit), then go on to Phase 2:**
+> **Goal -- ship Phase 2 (SSH layer), then go on to Phase 3:**
 >
-> 1. **Verify the premise before building.** Do *Session start* above. Read spec sections 2 (D5 to D8, D12, D14), 4, 5.1 to 5.4, 5.9 and 6, and `CLAUDE.md`. Confirm, and record each result in spec section 3 and `docs/progress.md`:
+> 1. **Verify the premise before building.** Do *Session start* above. Read spec sections 2 (D5, D6, D13, D14), 3 (F10, F12), 4, 5.5, 6 and 7, and `CLAUDE.md`. Confirm, and record each result in spec section 3 and `docs/progress.md`:
 >    - `mise run check` prints `check.sh: all OK` on the clean tree you start from, and CI is green on the head.
->    - F18 (YAML half): the implementer picks one of the two candidate YAML libraries after checking, in the library's own source or docs, that it can reject unknown keys, reject duplicate keys and report the position or path of each problem. The choice and the reason go into F18.
->    - The sandbox runs as root, so a file mode alone does not make a write fail. Tests that need an unwritable audit log or an unreadable key use a mechanism that also fails for root (a path under a regular file, a directory in place of the file, `/dev/full` for a failing write) and check key permissions by mode bits, not by trying to open the file.
+>    - F10, from primary sources (done by the lead on 2026-11-19; the row is updated in the start commit): OpenSSH 7.9 and later accept the `signal` request for command sessions that are not subsystems and not under a forced command, for a fixed list of signal names, and deliver it to the session's process group. The real-`sshd` lane must now observe it.
+>    - The real-`sshd` lane is CI-only (section 7 callout). The implementer's first pushed commit is the smallest `realsshd` that starts `sshd` as the runner's user on a loopback port and logs in, so that the CI-only loop is known to work before the rest is built on it. CI job logs can be read over REST.
 >    - Anything wrong: fix the spec with a `> **STATE AS OF YYYY-MM-DD**` callout in the affected section, note it in `docs/progress.md`, and continue.
-> 2. **Implement.** Make the start commit `docs(phase-1): start config, tenants, policy, audit` and record the phase base. Dispatch ONE implementer (`general-purpose`, `model: "opus"`, work order from `docs/phases/_templates/implementer.md`, pointers to spec sections 2, 4, 5.1 to 5.4, 5.9, 6 and 7). Deliverables, each with an acceptance criterion:
->    - `internal/tenant` (spec 5.2): `TenantID`, `Principal`, `AccessLevel` ordered `none < look < full`, `ServerID`, `CommandID`, and the server type with `IdentityFor(level)` -- it depends on nothing else in the module; the level comparison `required <= granted` exists in exactly one function.
->    - `internal/config` (spec 5.1): strict decoding and every validation rule of 5.1, errors as one line per problem in the form `path.to.key: message`, the limits with their defaults and allowed ranges -- every rule has a passing and a failing test; `access: full` is rejected with the exact message of 5.1; a second tenant is rejected through the one constant `MaxTenants`; a key file readable by group or other is refused; the example config of 5.1 loads when its key path and host key are replaced by ones generated in the test.
->    - `internal/policy` (spec 5.3): `Decide` with the three checks in order and the codes `not_found`, `access_denied`, `policy_denied`; the built-in command denylist and path denylist each in one file -- every built-in pattern has a must-match and a must-not-match case; a server of another tenant gives `not_found`, never `access_denied`; a grant of `full` built in test code is accepted by the policy engine (D5); operator additions from the config are applied.
->    - `internal/audit` (spec 5.4): the JSONL writer (`O_APPEND`, mode 0600, synced after each event, UTC RFC 3339 timestamps) and typed constructors for every event of 5.4 -- audit-before-act is proven: with a log that cannot be written the write returns an error and the guarded action in the test does not run; concurrent writers never interleave a line; an existing log is appended to, never truncated; no event type can carry a token or key material.
->    - `yasshm config check --config <file>` (spec 5.9): exit 0 on a valid file, exit 1 with the error lines on stderr otherwise -- covered by tests through the command function, and by one test that runs it against a file on disk.
->    - Fuzz targets for the config decoder and for the command and path guard rails, with seed corpora that run in the gate as ordinary tests; `mise run fuzz` finds and runs them.
->    - Architecture: `yasshm.config`, `yasshm.policy` and `yasshm.audit` lose `#planned` in the same commits that build them; `mise run arch:gen` output committed.
->    - The dependency rule of spec section 4 holds (`tenant` imports nothing from the module; `config`, `policy`, `audit` import only `tenant`, except that `policy` may take the operator's deny lists as plain values) and a test or lint rule enforces it.
->    - New dependencies are only a YAML library and `golang.org/x/crypto` (D14), each justified in the report; `mise run check -- vuln` clean.
+> 2. **Implement.** Make the start commit `docs(phase-2): start ssh layer` and record the phase base. Dispatch ONE implementer (`general-purpose`, `model: "opus"`, work order from `docs/phases/_templates/implementer.md`, pointers to spec sections 2, 4, 5.5, 6 and 7, RFC 4254 and the `golang.org/x/crypto/ssh` docs). Deliverables, each with an acceptance criterion:
+>    - `internal/sshclient` (spec 5.5): `Exec`, `Signal`, `Download`, `Upload`, `Probe` and the error mapping (`ssh_unreachable`, `ssh_auth_failed`, `host_key_mismatch`, `timeout`, `internal`) -- one connection per command; the host key callback accepts only the pinned key or the pinned `known_hosts` entries and never a certificate authority; the private key is read through `internal/keyfile` at use; no PTY, no agent or port forwarding, no environment request, stdin closed; every function takes a `TenantID`; it imports only `tenant` and `keyfile` from this module.
+>    - Cancellation (spec 5.5): cancelling the context sends `TERM`, waits `kill_grace_seconds`, sends `KILL`, then closes the session. `Signal` reports whether the server accepted the request (the request is sent with want-reply set); a refusal closes the session and returns an error the caller can match, so Phase 3 can record that the remote process may still be running. Closing a session is never relied on to stop a command.
+>    - `internal/testkit/sshtest`: the in-process SSH server of spec section 7 (real `sh -c` in a temp directory, `signal` honoured for the process group, SFTP from a temp root, switches for a wrong host key, a refused key, a connection dropped mid-stream, a refused `signal`, a slow banner).
+>    - `internal/testkit/realsshd`: starts a real `sshd` as the current user on a random loopback port with a generated host key and `authorized_keys` (the key line starts with `restrict`, and has no forced command).
+>    - The SSH contract suite (exec, exit codes, exit by signal, `TERM` then `KILL`, timeouts, output of several megabytes on both streams, SFTP download with offset and limit, SFTP upload with mode and overwrite rules, host key mismatch, refused key, unreachable port) runs against both servers. Locally, where `sshd` is absent, the gate says in one line that the real-`sshd` half ran in CI only; in CI the gate fails if `sshd` is absent or if the real-`sshd` half did not run. No build tag and no skip hides it.
+>    - F10 becomes CONFIRMED or is corrected, from what the real-`sshd` half observes in CI: the request is accepted, the process group dies, and what happens to a child that left the group is recorded.
+>    - No test needs the network beyond loopback; no test leaves a process, a connection or a temp file behind (asserted in the suite).
+>    - New dependency: one SFTP library (D14), justified in the report; `mise run check -- vuln` clean.
+>    - Architecture: `yasshm.ssh` loses `#planned` in the commit that builds it; `mise run arch:gen` output committed.
 >    - `README.md`, `TESTING.md` and `CLAUDE.md` gotchas updated where the phase changed something; `CHANGELOG.md` has the `[Unreleased]` entries.
->    - Acceptance: `mise run check` green on a clean tree with coverage at or above 85, and CI green on the pushed head.
-> 3. **Four-lane gate** -- dispatch code-review, simplification, and security lanes in parallel (read-only), then the QA lane (the only lane that runs the gate); all `general-purpose`, **`model: "fable"`**. Work orders from `docs/phases/_templates/`. Reports to `docs/phases/1/reports/<lane>.md` AND as the lane's final text (AND via `SendMessage` to `team-lead` where the lane has that tool). Commit the three read-only reports before dispatching QA (QA needs a clean tree). Triage, ONE fix commit `fix(config): apply the review-gate findings`, re-run the gate, confirm `git status --porcelain` is empty.
-> 4. **Ship** -- make the ship commit `docs(phase-1): ship config, tenants, policy, audit` (body summarises gate results) with `CHANGELOG.md`, `docs/progress.md` and **this file retargeted to Phase 2** (see *Self-advance*); push the working branch; confirm CI green on the ship commit. Then start Phase 2 from *Session start*.
+>    - Acceptance: `mise run check` green on a clean tree with coverage at or above 85, and CI green on the pushed head with the real-`sshd` half shown as run in the job log.
+> 3. **Four-lane gate** -- dispatch code-review, simplification, and security lanes in parallel (read-only), then the QA lane (the only lane that runs the gate); all `general-purpose`, **`model: "fable"`**. Work orders from `docs/phases/_templates/`. Reports to `docs/phases/2/reports/<lane>.md`; a lane's final text is its verdict, its finding count and that path. Wait for each lane's completion notice, then commit the three read-only reports before dispatching QA (QA needs a clean tree). QA must find the real-`sshd` half in the CI job log for the head. Triage, ONE fix commit `fix(ssh): apply the review-gate findings`, re-run the gate, confirm `git status --porcelain` is empty.
+> 4. **Ship** -- make the ship commit `docs(phase-2): ship ssh layer` (body summarises gate results) with `CHANGELOG.md`, `docs/progress.md` and **this file retargeted to Phase 3** (see *Self-advance*); push the working branch; confirm CI green on the ship commit. Then start Phase 3 from *Session start*.
 >
-> **Phase 1 is done when:** the deliverables above are met, CI green, the gate green locally on a clean tree, `docs/progress.md` + `CHANGELOG.md` updated, **and `GOAL.md` retargeted to Phase 2 and pushed.**
+> **Phase 2 is done when:** the deliverables above are met, CI green, the gate green locally on a clean tree, `docs/progress.md` + `CHANGELOG.md` updated, **and `GOAL.md` retargeted to Phase 3 and pushed.**
 >
 > **The run is done when** phases 0 to 8 are marked `SHIPPED` in the roadmap below and the attended queue is written under `## Blocked on user` and pushed. **It is also done when** `## Blocked on user` names one concrete action only the user can take and the lead has committed it, pushed it and stopped -- a parked attended step is a clean exit, not a failure. **Stop only** for that, for a genuine decision you + an advisor skill cannot confidently make, or for a permission the harness will not grant.
 >
@@ -89,7 +89,7 @@ Leave `GOAL.md` pointed at the **next** phase, then run it:
 - Append anything you learned to **Lessons** (process traps only -- feature notes go in `docs/progress.md` and spec callouts).
 - **Advance only within the approved roadmap.** If the next row in *Approved roadmap* exists, rewrite the `## Goal` block for it and continue. If it does not, the roadmap is exhausted: write the maintenance/park block below instead of inventing a phase.
 - Any follow-on work the lanes surfaced goes under *Proposed (needs user approval)*, not into the approved roadmap. It runs only after the user approves it (which moves it up into *Approved roadmap*).
-- **Next approved phase after Phase 1: Phase 2 (SSH layer).**
+- **Next approved phase after Phase 2: Phase 3 (Jobs, store, outputs).**
 
 ### Parking when the roadmap is exhausted
 
@@ -140,6 +140,10 @@ Added by the build session (2026-11-19):
 - **Resume the implementer for the fix commit** (`SendMessage` to its agent id with the triaged list) instead of briefing a new agent: it already knows the files.
 - **The start commit cannot hold its own SHA.** Write the phase base into the ledger in the ship commit.
 - **The sandbox runs as root.** A file mode does not stop root from reading or writing, so a test that needs an unwritable or unreadable file must use something that fails for root too.
+- **Commit a lane's report only after the lane's completion notice.** A lane can rewrite its file after the first copy appears; a report committed early leaves the tree dirty under QA's gate run (Phase 1).
+- **Ask a lane for a short final text** (verdict, finding count, report path). The lead reads the report file; the same report again as a message doubles the cost.
+- **Ask QA for mutations.** Changing a bound, deleting a check or removing a lock and seeing whether a test fails found tests that could not fail (Phase 1). Name the invariants worth mutating in the QA work order.
+- **Probe a fix that changes matching or parsing.** The Phase 1 fix commit passed the gate and still opened a bypass the first review never saw, because the fix was new code. After a fix commit that changes how input is matched, the lead writes a throwaway test with hostile inputs, runs it, deletes it, and sends failures back as a second fix commit. "ONE fix commit" is the aim, not a reason to ship a known hole.
 - **The lead re-runs the gate itself after the fix commit** and reads CI for that commit. A second QA dispatch is only for a fix that changed behaviour the first QA run did not see.
 
 ## Reference
@@ -167,7 +171,7 @@ Drafted by the planning session on 2026-11-18 from the owner's decisions (spec s
 | Phase | Where | Implementer -> Reviewers | Effort | Notes |
 |---|---|---|---|---|
 | ~~**0 Scaffold**~~ | this repo | sonnet -> opus | low | **SHIPPED**, `34d6001` .. the commit `docs(phase-0): ship scaffold`. Lesson: the first coverage step summed one copy of every block per test binary; the review lanes caught it by hand-counting statements, so have QA hand-derive every number a gate step prints |
-| **1 Config, tenants, policy, audit** | this repo | opus -> fable | med | Spec 5.1 to 5.4 and `config check`. `look` only, `full` reserved, one tenant, tenant id everywhere, audit-before-act |
+| ~~**1 Config, tenants, policy, audit**~~ | this repo | opus -> fable | med | **SHIPPED**, `6cc1f31` .. the commit `docs(phase-1): ship config, tenants, policy, audit`. Lesson: the blockers were all fail-open paths on input nobody had tried (a null value, a zero value, a certificate-authority line), and QA found tests that could not fail by mutating the code; ask every QA lane for mutations |
 | **2 SSH layer** | this repo | opus -> fable | high | Spec 5.5. Pinned host keys, exec, signals, SFTP, the in-process test server and the real-`sshd` lane |
 | **3 Jobs, store, outputs** | this repo | opus -> fable | high | Spec 5.6. Lifecycle, paging, limits, retention, restart recovery, SQLite |
 | **4 Authenticator** | this repo | opus -> fable | med | Spec 5.7. Access token verification behind the interface, local issuer for tests |
