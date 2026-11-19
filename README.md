@@ -6,7 +6,7 @@ MIT licensed. Built by [Infinite Room Labs](https://github.com/InfiniteRoomLabs)
 
 ## Status
 
-Planned, not built. There is no product code yet and nothing to install. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
+Early scaffold. The module builds a `yasshm` binary with a `version` subcommand and the full gate is in place; the gateway itself is not built yet and there is nothing to deploy. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
 
 ## What v0.1 will be
 
@@ -34,7 +34,7 @@ The architecture is modelled as code with [LikeC4](https://likec4.dev) in `docs/
 ## Contributing
 
 - Toolchain via [mise](https://mise.jdx.dev/): `scripts/bootstrap.sh` or `mise install`. Go and golangci-lint are pinned in `mise.toml`; Node and pnpm are there only for LikeC4.
-- The gate: `mise run check`. See `TESTING.md` for the testing rules.
+- The gate: `mise run check` runs `fmt lint skipcheck test cover vuln build arch` and fails on a dirty tree; `mise run check -- <step>` runs one step. `mise run build` writes `dist/yasshm_<version>_linux_{amd64,arm64}` and `dist/SHA256SUMS`. See `TESTING.md` for the testing rules.
 - Commits: [Conventional Commits](https://www.conventionalcommits.org/), imperative mood, scoped.
 - If you use Claude Code, install the [agent-ops marketplace](https://github.com/InfiniteRoomLabs/agent-ops) -- it provides the changelog guard that keeps `CHANGELOG.md` honest and the goal loop this repo is built with (`GOAL.md`).
 - `scripts/redaction-check.sh` (a pre-commit hygiene check) is optional for outside contributors; it no-ops when `REDACTION_TERMS_RESOLVER` is not set.

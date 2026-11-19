@@ -70,7 +70,8 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 | Design spec | `docs/superpowers/specs/2026-11-18-yasshm-design.md` |
 | Architecture model / project config / generated diagrams | `docs/architecture/*.c4`, `docs/architecture/likec4.config.json`, `docs/architecture/generated/` |
 | Testing rules | `TESTING.md` |
-| Code (from Phase 0 on) | `cmd/yasshm/`, `internal/<package>/`, test support in `internal/testkit/`, end-to-end tests in `test/e2e/` |
+| Build, fuzz, lint config | `scripts/build.sh`, `scripts/fuzz.sh`, `.golangci.yml` |
+| Code | `cmd/yasshm/`, `internal/<package>/`, test support in `internal/testkit/`, end-to-end tests in `test/e2e/` |
 | Operator manual tests (written in Phase 7, never run by the loop) | `test/manual/` |
 | Harness bootstrap (marketplaces, plugins, MCP allowlist) | `.claude/settings.json`, `.mcp.json` |
 | Codex brief | `AGENTS.md` |
@@ -79,7 +80,11 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 
 ```bash
 scripts/bootstrap.sh                  # mise + pinned toolchain on a bare machine; no-op when current
-mise run check                        # the gate (all steps + dirty-tree banner); `mise run check -- <step>` for one
+mise run check                        # the gate: fmt lint skipcheck test cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
+mise run build                        # dist/yasshm_<version>_linux_{amd64,arm64} + dist/SHA256SUMS
+mise run test                         # go test -race with coverage.out (the gate's test step uses it)
+mise run lint                         # golangci-lint
+mise run fuzz                         # every Fuzz target for 30 seconds each; passes when there are none
 mise exec -- go version               # any Go command goes through mise
 mise run arch:dev                     # live diagram browser at http://localhost:5173
 mise run arch:validate                # LikeC4 syntax + layout-drift check
@@ -95,7 +100,11 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - `#USAGE` directives take **no space** after `#`. `usage` 6.0.0 silently ignores `# USAGE`, and the script then runs with every `usage_*` variable unset.
 - The changelog guard and version guard are Claude hooks from agent-ops, not git hooks. If a commit is blocked, read the message and fix the staging -- do not bypass.
 - `.claude/` is committed through a `.gitignore` allowlist (`settings.json` and `.gitignore` only). `git add .claude/anything-else` is silently ignored.
-- `mise run check` on a dirty tree prints a banner and still exits 0 until Phase 0 turns the banner into a failure: green describes disk, not HEAD. Verify `git status --porcelain` is empty before reporting a gate result.
+- `mise run check` fails (exit 1) on a dirty tree, after `all` and after a single step: commit or stash before gating, so green describes HEAD. The gate itself never dirties the tree (`coverage.out` and `dist/` are gitignored).
+- `-race` needs CGO, so the `test` task sets `CGO_ENABLED=1` for the test binary only; `build` is always `CGO_ENABLED=0`.
+- `cover` reads `coverage.out` and fails when it is missing: run `mise run check -- test` first. The floor is `COVER_FLOOR` at the top of `scripts/check.sh`.
+- The sandbox has no `sshd`: `scripts/bootstrap.sh` and the gate print one line saying the real-sshd lane runs in CI only; CI installs `openssh-server` and fails if it is absent.
+- govulncheck is pinned in `mise.toml [tools]` through the `go:` backend (`"go:golang.org/x/vuln/cmd/govulncheck"`); bump it to a released version, never `@latest`.
 - LikeC4 is pinned in `mise.toml [env] LIKEC4_VERSION`, not `[tools]` (it is not in the mise registry; every call is `pnpm dlx`). Bump only to a release at least 7 days old -- the pnpm release-age gate refuses younger ones and the failure reads as a resolution error, not a LikeC4 error.
 - `.mcp.json` uses `${CLAUDE_PROJECT_DIR}`, not `${workspaceFolder}`: Claude Code does not expand the VS Code variable and passes it through literally.
 - The first `mise run check` on a clean machine downloads ~120 MB of LikeC4; it is cached after that. There is no SVG export -- diagrams are committed as Mermaid so GitHub renders them; PNG needs Playwright and is not in the gate.

@@ -1,6 +1,6 @@
 # TESTING.md -- how yasshm tests
 
-Referenced from `CLAUDE.md` and `README.md`. This is the single source of truth for **how we test**; the concrete steps are the ones `scripts/check.sh` runs. Today that is `arch` only. Phase 0 of the roadmap adds `fmt`, `lint`, `skipcheck`, `test`, `cover`, `vuln` and `build`, and rewrites this sentence to match. How the rules below apply to this project (the layers, the test support packages, the scenarios) is spec section 7 (`docs/superpowers/specs/2026-11-18-yasshm-design.md`).
+Referenced from `CLAUDE.md` and `README.md`. This is the single source of truth for **how we test**; the concrete steps are the ones `scripts/check.sh` runs. The gate, in order, is `fmt` (gofmt reports nothing), `lint` (golangci-lint, `.golangci.yml`, warnings are errors, `nolint` needs a named linter and a reason), `skipcheck` (no skipped test without an issue link on the same line), `test` (`go test -race -shuffle=on -count=1` with a coverage profile over all packages, written to the gitignored `coverage.out`), `cover` (total at or above the floor, 85 percent, `internal/testkit/...` the only exclusion; it fails if there is no profile, so run `test` first), `vuln` (`govulncheck ./...`), `build` (the release files in `dist/`) and `arch`. Each runs alone as `mise run check -- <step>`. A dirty tree fails the gate. When `sshd` is not installed locally the gate prints a line saying the real-sshd lane runs in CI only. `mise run fuzz` runs every `Fuzz*` target for 30 seconds each and is not part of the gate. How the rules below apply to this project (the layers, the test support packages, the scenarios) is spec section 7 (`docs/superpowers/specs/2026-11-18-yasshm-design.md`).
 
 ## What gets an automated test, and what cannot
 
@@ -15,7 +15,7 @@ Non-negotiable, enforced by tooling, not honor system:
 - **Never ignore:** a failing test blocks the merge. There is no "known-failing" allowance -- intentionally divergent behavior is fixed or locked in by a *passing* test that documents it.
 - **Warnings are errors.** Lint and compiler warnings fail the gate.
 
-`mise run check` must be green on a clean tree (`git status --porcelain` empty) before any phase merges. A green gate on a dirty tree describes disk, not HEAD.
+`mise run check` must be green on a clean tree (`git status --porcelain` empty) before any phase merges. A dirty tree fails the gate, because a green result on a dirty tree describes disk, not HEAD.
 
 ## The pyramid
 
