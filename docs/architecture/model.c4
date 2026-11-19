@@ -58,9 +58,8 @@ model {
     }
 
     ssh = component 'SSH client' {
-      #planned
-      technology 'golang.org/x/crypto/ssh, SFTP'
-      description 'Pinned host keys, command execution, file transfer'
+      technology 'golang.org/x/crypto/ssh, github.com/pkg/sftp'
+      description 'One connection per call: pinned host keys (internal/hostkey), command execution stopped by the SSH signal request, SFTP file transfer, a fixed probe'
     }
 
     config = component 'Config loader' {
@@ -95,7 +94,7 @@ model {
     jobs -> outputs 'streams captured output'
     auth -> config 'reads the identity mapping'
     policy -> config 'reads tenants, grants and rules'
-    ssh -> config 'reads server definitions'
+    ssh -> config 'reads server definitions, the key file and the pinned host keys at connect'
   }
 
   operator -> assistant 'asks for work'

@@ -17,12 +17,13 @@ const module = "github.com/InfiniteRoomLabs/yasshm"
 // its non-test files may import (spec section 4). A package missing from this
 // map may import anything; add it here when its phase builds it.
 var allowed = map[string][]string{
-	"tenant":  {},
-	"keyfile": {},
-	"hostkey": {},
-	"config":  {"internal/tenant", "internal/keyfile", "internal/hostkey"},
-	"policy":  {"internal/tenant"},
-	"audit":   {"internal/tenant"},
+	"tenant":    {},
+	"keyfile":   {},
+	"hostkey":   {},
+	"config":    {"internal/tenant", "internal/keyfile", "internal/hostkey"},
+	"policy":    {"internal/tenant"},
+	"audit":     {"internal/tenant"},
+	"sshclient": {"internal/tenant", "internal/keyfile", "internal/hostkey"},
 }
 
 // testAllowed is added to allowed for _test.go files: test support only.

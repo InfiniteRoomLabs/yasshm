@@ -30,6 +30,7 @@ graph TB
   Yasshm.Jobs -. "`runs commands and transfers files`" .-> Yasshm.Ssh
   Yasshm.Jobs -. "`records command state`" .-> Yasshm.Store
   Yasshm.Jobs -. "`streams captured output`" .-> Yasshm.Outputs
-  Yasshm.Ssh -. "`reads server definitions`" .-> Yasshm.Config
+  Yasshm.Ssh -. "`reads server definitions, the key file 
+and the pinned host keys at connect`" .-> Yasshm.Config
   Yasshm.Auth -. "`fetches signing keys`" .-> Edge
   Yasshm.Ssh -. "`SSH with pinned host keys`" .-> Targets

@@ -87,7 +87,9 @@ run_sshd() {
     echo "sshd: the real-sshd tests failed" >&2
     exit 1
   fi
-  grep -E '^[[:space:]]*--- (PASS|FAIL)' "$log" || true
+  # The evidence QA reads in the CI log: sshd's version, the F10
+  # observations and every real-sshd verdict.
+  grep -E 'realsshd: |F10 observed|^[[:space:]]*--- (PASS|FAIL)' "$log" || true
   local passed
   passed=$(grep -cE '^[[:space:]]*--- PASS: TestRealSSHD[^ ]*/' "$log" || true)
   if [ "${passed:-0}" -lt 1 ]; then
