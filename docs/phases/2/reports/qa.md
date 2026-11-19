@@ -22,7 +22,7 @@ check.sh: all OK
 
 Recomputed by hand: 1410 of 1486 statements.
 
-CI for head `5860501`: run `44631648629`, job `135939540471`, `success` . From the job log: `YASSHM_REQUIRE_SSHD: 1` in the step's env; `realsshd: /usr/sbin/sshd listening on 127.0.0.1:<port> as user runner (version: SSH-2.0-OpenSSH_10.2p1 Ubuntu-2ubuntu3.8)`; 25 `--- PASS: TestRealSSHDContract/...` lines (counted; 0 FAIL); `sshd: 26 real-sshd scenarios passed` (25 plus `TestRealSSHDLogin/happy/echo_ok_over_a_real_sshd`); `cover: total 95.0%`. The four `F10 observed` lines: setsid child survived `TERM` (true); `TERM` with want-reply ACCEPTED; `INT HUP QUIT USR1 USR2 KILL` accepted and delivered; command still running after the client closed (true).
+CI for head `5860501`: run `44631648629`, job `135939540471`, `success`. From the job log: `YASSHM_REQUIRE_SSHD: 1` in the step's env; `realsshd: /usr/sbin/sshd listening on 127.0.0.1:<port> as user runner (version: SSH-2.0-OpenSSH_10.2p1 Ubuntu-2ubuntu3.8)`; 25 `--- PASS: TestRealSSHDContract/...` lines (counted; 0 FAIL); `sshd: 26 real-sshd scenarios passed` (25 plus `TestRealSSHDLogin/happy/echo_ok_over_a_real_sshd`); `cover: total 95.0%`. The four `F10 observed` lines: setsid child survived `TERM` (true); `TERM` with want-reply ACCEPTED; `INT HUP QUIT USR1 USR2 KILL` accepted and delivered; command still running after the client closed (true).
 
 ## BLOCKING
 
@@ -34,7 +34,7 @@ CI for head `5860501`: run `44631648629`, job `135939540471`, `success` . From t
 ## ADVISORY
 
 5. **The `sshd` step passes when the contract half did not run.** `scripts/check.sh:94-95` needs one PASS line of any `TestRealSSHD*/` subtest. Step logic run on captured output: zero scenario lines -> exit 1 (correct); login subtest only, contract suite absent -> `sshd: 1 real-sshd scenarios passed`, exit 0; one of 25 scenarios -> exit 0. Count `TestRealSSHDContract/` lines against the in-process suite's count.
-6. **Mutation survivors (28 run, 4 survived).** The early `checkServer` in `Download` and `Upload` (`sftp.go:87`, `:136`; `dial` repeats it); `mayStillRun` in `closeConn` (`command.go:256-258`; `finish` sets it for every `no_status`); `nc.SetDeadline` (`client.go:199-201`; the `AfterFunc` suffices). Two more are killed only by a hang until the test timeout (10 minutes in the gate): stdin left open, and a refused `Signal` that does not close the session. 
+6. **Mutation survivors (28 run, 4 survived).** The early `checkServer` in `Download` and `Upload` (`sftp.go:87`, `:136`; `dial` repeats it); `mayStillRun` in `closeConn` (`command.go:256-258`; `finish` sets it for every `no_status`); `nc.SetDeadline` (`client.go:199-201`; the `AfterFunc` suffices). Two more are killed only by a hang until the test timeout (10 minutes in the gate): stdin left open, and a refused `Signal` that does not close the session.
 7. **"No process left behind" is not asserted for real `sshd`.** `internal/testkit/realsshd/realsshd.go:316-328` stops the listener only. For `sshtest`, `Close` holds it (mutation killed). Locally, 20 passes left no child process and no `/tmp` entry.
 8. **`client_test.go:213-225` does not test what it names here.** It returned in 0.00 s (no route to 192.0.2.1): no cancel happens during a dial in the sandbox. It is the only non-loopback dial.
 9. **Docs.** `docs/progress.md:11` lists the gate without `sshd` (ship commit). `CHANGELOG.md` and `errors.go:53-57` say "never the host", false until finding 2 is fixed.
