@@ -35,17 +35,18 @@ func dial(t *testing.T, s *Server) *ssh.Client {
 	return c
 }
 
-// serverGoroutines counts goroutines running this package's code.
-func serverGoroutines() int {
+// serverGoroutines returns the stacks of goroutines running this
+// package's server code.
+func serverGoroutines() []string {
 	buf := make([]byte, 1<<20)
 	n := runtime.Stack(buf, true)
-	c := 0
+	var out []string
 	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
 		if strings.Contains(g, "internal/testkit/sshtest.(*Server)") && !strings.Contains(g, "testing.tRunner") {
-			c++
+			out = append(out, g)
 		}
 	}
-	return c
+	return out
 }
 
 func alive(pid int) bool {
@@ -62,7 +63,7 @@ func alive(pid int) bool {
 
 func TestServer(t *testing.T) {
 	t.Run("happy/exec, refused requests are recorded, Close kills the children", func(t *testing.T) {
-		before := serverGoroutines()
+		before := len(serverGoroutines())
 		s := Start(t, Options{})
 		c := dial(t, s)
 		sess, err := c.NewSession()
@@ -99,8 +100,13 @@ func TestServer(t *testing.T) {
 		if alive(pids[0]) || s.Running() != 0 || s.Conns() != 0 {
 			t.Fatalf("after Close: pid alive %v running %d conns %d", alive(pids[0]), s.Running(), s.Conns())
 		}
-		if n := serverGoroutines(); n > before {
-			t.Fatalf("%d server goroutines survived Close", n-before)
+		// A goroutine past wg.Done may still be returning: poll briefly.
+		g := serverGoroutines()
+		for deadline := time.Now().Add(2 * time.Second); len(g) > before && time.Now().Before(deadline); g = serverGoroutines() {
+			runtime.Gosched()
+		}
+		if len(g) > before {
+			t.Fatalf("%d server goroutines survived Close:\n%s", len(g)-before, strings.Join(g, "\n\n"))
 		}
 	})
 	t.Run("happy/exit-signal names", func(t *testing.T) {

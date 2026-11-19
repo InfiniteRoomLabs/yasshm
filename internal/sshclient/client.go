@@ -189,6 +189,9 @@ func (c *Client) dial(ctx context.Context, tid tenant.TenantID, srv *tenant.Serv
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, ctxErr(srv.ID, op, cerr)
 		}
+		if pastDeadline(ctx) {
+			return nil, ctxErr(srv.ID, op, context.DeadlineExceeded)
+		}
 		return nil, newErr(CodeUnreachable, srv.ID, op, "the TCP connection failed", nil, err)
 	}
 	// The handshake has no context; closing the conn is how ctx ends it.
@@ -232,6 +235,10 @@ func handshakeErr(ctx context.Context, server tenant.ServerID, op string, err er
 		return e
 	case ctx.Err() != nil:
 		return ctxErr(server, op, ctx.Err())
+	case pastDeadline(ctx):
+		// The conn deadline, set to the caller's deadline, can fire a moment
+		// before the context's own timer marks it done.
+		return ctxErr(server, op, context.DeadlineExceeded)
 	case strings.Contains(err.Error(), "ssh: unable to authenticate"):
 		// x/crypto has no typed client-side auth error; this text is pinned
 		// by a test against both servers.
@@ -239,6 +246,12 @@ func handshakeErr(ctx context.Context, server tenant.ServerID, op string, err er
 	default:
 		return newErr(CodeUnreachable, server, op, "the SSH handshake failed", nil, err)
 	}
+}
+
+// pastDeadline reports whether ctx has a deadline that has passed.
+func pastDeadline(ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	return ok && !time.Now().Before(d)
 }
 
 // signalNames are the signal names OpenSSH accepts in a signal request
