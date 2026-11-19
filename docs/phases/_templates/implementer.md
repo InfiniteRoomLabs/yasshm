@@ -4,7 +4,7 @@ Dispatch: `Agent(subagent_type: "general-purpose", model: "<per the Retarget tab
 
 ---
 
-You are implementing **Phase <n> (<name>)** of `yasshm`. Work ONLY inside `<absolute path of the clone>` on branch `<branch>` (already created from `feat/yasshm-mvp`, clean). Do not touch other branches, other worktrees or the other repository.
+You are implementing **Phase <n> (<name>)** of `yasshm`. Work ONLY inside `<absolute path of the clone>` on branch `<working branch>` (already checked out and clean; this phase starts at commit `<phase base sha>`). Do not create, switch to or push any other branch, and do not touch the other repository.
 
 ## Read first (pointers, not pasted)
 
@@ -20,7 +20,7 @@ You are implementing **Phase <n> (<name>)** of `yasshm`. Work ONLY inside `<abso
 - Doc comments on every exported member; changelog `[Unreleased]` entry in the existing style.
 - Architecture: remove `#planned` from the elements this phase builds (<FQNs>), run `mise run arch:gen`, and commit the model and the regenerated diagrams with the code.
 - `mise run check` green on a clean tree. Always run tooling via `mise run ...` or `mise exec -- ...`; never a bare `go`.
-- Commit on `<branch>` in TDD-sized conventional commits (`feat(<scope>): ...`), each green. **Stage and commit in separate tool calls.** Do NOT push, do NOT merge -- the lead runs the gate and ships.
+- Commit on `<working branch>` in TDD-sized conventional commits (`feat(<scope>): ...`), each green. **Stage and commit in separate tool calls.** After every green commit run `git push origin HEAD`: the session's machine can be reclaimed and only pushed commits survive. Never force-push and never push another branch. The lead runs the gate and makes the ship commit.
 
 ## Gotchas (these cost prior runs time)
 
@@ -32,4 +32,4 @@ You are implementing **Phase <n> (<name>)** of `yasshm`. Work ONLY inside `<abso
 
 ## Reporting (both channels)
 
-When done (gate green, committed, `git status --porcelain` empty): write the report to `docs/phases/<n>/reports/implementer.md` (commit it), send the same report with `SendMessage` to `team-lead` (report in `message`, not `summary`), AND return it as your final text. Report: files created/changed, test counts, coverage, the exact gate tail, `git log --oneline feat/yasshm-mvp..<branch>`, `git status --porcelain` output, every new dependency with its justification, and every spec discrepancy or ambiguity you hit and how you resolved it. If you are genuinely blocked, report the blocker the same way instead of guessing.
+When done (gate green, committed, `git status --porcelain` empty): write the report to `docs/phases/<n>/reports/implementer.md` (commit it), send the same report with `SendMessage` to `team-lead` (report in `message`, not `summary`), AND return it as your final text. Report: files created/changed, test counts, coverage, the exact gate tail, `git log --oneline <phase base sha>..HEAD`, `git status --porcelain` output, every new dependency with its justification, and every spec discrepancy or ambiguity you hit and how you resolved it. If you are genuinely blocked, report the blocker the same way instead of guessing.

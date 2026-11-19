@@ -4,7 +4,7 @@ Dispatch: `Agent(subagent_type: "general-purpose", model: "<one tier above the i
 
 ---
 
-You are the **simplification lane** of a four-lane review gate for branch `<branch>` in `<absolute path of the clone>` (`git diff feat/yasshm-mvp...<branch>`). **PROPOSE ONLY:** do not modify files, do not commit, and do NOT run `mise run check`, tests, or builds. You may run `git`, `grep`, and read files.
+You are the **simplification lane** of a four-lane review gate for Phase <n> in `<absolute path of the clone>` (`git diff <phase base sha>..HEAD` on branch `<working branch>`). **PROPOSE ONLY:** do not modify files, do not commit, and do NOT run `mise run check`, tests, or builds. You may run `git`, `grep`, and read files.
 
 ## Context
 

@@ -6,9 +6,9 @@ Cut from `InfiniteRoomLabs/template-repo`. This file is the living rulebook: whe
 
 ## How this repo runs
 
-- It runs on the `/goal` treadmill (agent-ops `agency` plugin). Every phase is `/goal complete everything in @GOAL.md` in a fresh context; from a session that starts above the clones it is `/goal complete everything in @yasshm/GOAL.md`. One run ships one phase and retargets `GOAL.md`.
-- The planning is done: the spec, `GOAL.md` and the work orders were written on 2026-11-18. Do not run `/new-goal-loop` again.
-- The build session is a cloud session with **two repositories**: this one (public) and the operator's infra repository (private). `GOAL.md` *Session start* is the checklist for that; do it at the start of every run.
+- It runs on the `/goal` treadmill (agent-ops `agency` plugin), adapted to **one cloud session that runs the whole roadmap**. The session is started once with the kickoff prompt in `GOAL.md`. Its lead is an orchestrator on the fable model: it dispatches, verifies and ships, and subagents build and review. When a phase ships, the lead retargets `GOAL.md` and goes straight on to the next phase.
+- The planning is done: the spec, `GOAL.md` and the work orders were written on 2026-11-18 and revised on 2026-11-19. Do not run `/new-goal-loop` again.
+- The build session holds **two repositories**: this one (public) and the operator's infra repository (private). Each clone starts on its default branch, and the session works on its own working branch in each. `GOAL.md` *Session start* is the checklist; do it at kickoff and again before every phase.
 
 ## Read-first
 
@@ -19,14 +19,16 @@ Cut from `InfiniteRoomLabs/template-repo`. This file is the living rulebook: whe
 
 ## Hard limits (they override everything else here)
 
-The build loop **never** deploys, applies infrastructure, reaches a real target host or the real edge, logs in to a password manager, reads or asks for a secret, runs a manual test, pushes a tag, force-pushes, deletes a branch, or pushes to `main` (here) or to the infra repo's default branch. No done criterion depends on any of those. When a step needs one, write it under `## Blocked on user` in `GOAL.md`, commit, push, say so once and stop.
+The build loop **never** deploys, applies infrastructure, reaches a real target host or the real edge, logs in to a password manager, reads or asks for a secret, runs a manual test, pushes a tag, force-pushes, deletes a branch, or pushes any branch except its working branch (so never `main` here, never the infra repo's default branch, never the plan branch `feat/yasshm-mvp`). No done criterion depends on any of those. When a step needs one, write it under `## Blocked on user` in `GOAL.md`, commit, push, say so once and stop.
 
 Everything that can be tested without those things must be tested, automatically, in the gate (spec D15).
 
-## Two repositories, one branch name
+## Two repositories, one working branch in each
 
-- The integration branch is **`feat/yasshm-mvp`** in both repos. Phase branches `phase-<n>/<name>` fork from it and merge into it with `--no-ff`. Where a work order or lesson says `main`, read `feat/yasshm-mvp`.
-- Work in the infra repo only in Phase 8, on that repo's `feat/yasshm-mvp`, under that repo's own `CLAUDE.md` and `CONTRIBUTING.md`. Read them first; they differ from this file (secret handling, changelog, layout).
+- **The plan branch is `feat/yasshm-mvp`** in both repos. It holds the plan and nothing else; the session merges it into its working branch once, at kickoff, and never pushes to it.
+- **The working branch** of a clone is the branch the session was started on or told to develop on (a `claude/...` name). All work lands there and it is the only branch the session pushes. There are no phase branches and no merges: a phase is the commit range from `docs(phase-<n>): start <name>` to `docs(phase-<n>): ship <name>`. `GOAL.md` *How a phase lands* has the steps.
+- **Push the working branch after every green commit.** The session's machine can be reclaimed while it is idle; a reopened session starts from a fresh clone.
+- Work in the infra repo only in Phase 8, on the working branch there, under that repo's own `CLAUDE.md` and `CONTRIBUTING.md`. Read them first; they differ from this file (secret handling, changelog, layout).
 - **This repo is public, the infra repo is private.** Nothing from the infra repo -- host names, addresses, account or tenant ids, vault item names, the text of its plan documents -- goes into a file, report, commit message or branch name here. Refer to "the infra repo's plan document".
 
 ## Toolchain
@@ -38,13 +40,13 @@ Everything that can be tested without those things must be tested, automatically
 
 ## Working conventions
 
-- **Phases, not tasks.** One GOAL block = one phase = one branch `phase-<n>/<name>` = one gate = one `--no-ff` merge into `feat/yasshm-mvp`. Parallel batches (if any) run as worktrees under `.worktrees/` (gitignored); everything else is in-place branches.
-- **Four-lane review gate before every merge:** code review, simplification, security (parallel, read-only), then QA (the only lane that runs `mise run check`). Work orders in `docs/phases/_templates/`; reports to `docs/phases/<n>/reports/<lane>.md` and via `SendMessage` to `team-lead`. Commit the three read-only reports before dispatching QA. Triage, ONE fix commit, re-gate, merge.
+- **Phases, not tasks.** One GOAL block = one phase = one commit range on the working branch (start commit to ship commit) = one gate. This replaces the template's one-branch-and-one-merge-per-phase, because a cloud session can count on pushing only one branch per repository.
+- **Four-lane review gate before every ship commit:** code review, simplification, security (parallel, read-only), then QA (the only lane that runs `mise run check`). Work orders in `docs/phases/_templates/`; reports to `docs/phases/<n>/reports/<lane>.md` and via `SendMessage` to `team-lead`. Commit the three read-only reports before dispatching QA. Triage, ONE fix commit, re-gate, ship commit.
 - **Model rules (non-negotiable):** pass `model:` explicitly on every dispatch; reviewers one tier above the implementer (sonnet -> opus, opus -> fable); haiku only for read-only sweeps that cannot hit a permission prompt. Check an agent's `tools:` before writing its prompt; `general-purpose` has everything.
-- **Clean up agents** with `TaskStop` once they are no longer needed: review lanes after triage, implementers after their merge, QA after its verdict is acted on.
+- **Clean up agents** with `TaskStop` once they are no longer needed: review lanes after triage, implementers after their phase ships, QA after its verdict is acted on.
 - **Green rule:** see `TESTING.md`. Tests first where feasible; no skipped/focused/silenced tests without an issue link; warnings are errors; `go test -race -shuffle=on -count=1` always; coverage floor **85%** enforced by the gate, not by promises.
 - **Inferred vs confirmed:** facts about the outside world are CONFIRMED / INFERRED / TODO (spec section 3). When reality disagrees with the spec, reality wins -- add a `> **STATE AS OF YYYY-MM-DD**` callout in the affected spec section in the same commit.
-- **Commits:** conventional, imperative, scoped (`feat(<scope>): ...`, `fix: ...`, `docs: ...`, `chore(ci): ...`). **Stage and commit in separate tool calls** (version guard); never `-a`/`-am`, never `--no-verify`. `CHANGELOG.md` is staged with every merge into the integration branch (the changelog guard only enforces this on `main`; the rule is the same). Keep a Changelog, `[Unreleased]` on top. Co-author trailer per harness rules.
+- **Commits:** conventional, imperative, scoped (`feat(<scope>): ...`, `fix: ...`, `docs: ...`, `chore(ci): ...`). **Stage and commit in separate tool calls** (version guard); never `-a`/`-am`, never `--no-verify`. `CHANGELOG.md` is staged with every phase's ship commit (the changelog guard only enforces this on `main`; the rule is the same). Keep a Changelog, `[Unreleased]` on top. Co-author trailer per harness rules.
 - **Public-repo hygiene on every commit:** no vault item names, internal IPs/domains, real tenant/account IDs, tokens, or personal correspondents. Fixtures synthetic (`example.net`, documentation address ranges, keys generated in the test). Run `scripts/redaction-check.sh` before committing. A leak found in history is fixed by `git filter-repo` and a force-push to every remote, never by a working-tree edit, and only with the operator present. Never write a secret-shaped value into a goal, report, or commit message -- say "the real <thing>".
 - **Docs are ASCII-only and never hard-wrapped.** No smart quotes, em dashes, or arrows: use `--` and `->`. Diagrams are Mermaid.
 - **Remotes:** this repo may dual-push (GitHub + an internal mirror). `git remote -v` before pushing a WIP branch; internal hostnames never appear in tracked files.
@@ -83,7 +85,7 @@ mise run arch:dev                     # live diagram browser at http://localhost
 mise run arch:validate                # LikeC4 syntax + layout-drift check
 mise run arch:fmt                     # format .c4 sources in place
 mise run arch:gen                     # regenerate committed Mermaid diagrams + README splice
-scripts/redaction-check.sh            # staged index; --range feat/yasshm-mvp..phase-1/foo for a branch
+scripts/redaction-check.sh            # staged index; --range <phase base sha>..HEAD for a phase
 usage lint scripts/check.sh           # validate a #USAGE spec
 gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result without GraphQL
 ```
@@ -98,15 +100,16 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - `.mcp.json` uses `${CLAUDE_PROJECT_DIR}`, not `${workspaceFolder}`: Claude Code does not expand the VS Code variable and passes it through literally.
 - The first `mise run check` on a clean machine downloads ~120 MB of LikeC4; it is cached after that. There is no SVG export -- diagrams are committed as Mermaid so GitHub renders them; PNG needs Playwright and is not in the gate.
 - The VS Code LikeC4 extension registers its own `likec4` MCP server, so you may see two. Both work; pick one.
-- **Cloud session with two repositories:** it starts in the directory above the clones and loads no hooks, permission rules, `env` or MCP servers from either repo's `.claude/settings.json`; plugins come from the environment's setup script (spec F14). So nothing bootstraps itself: run `scripts/bootstrap.sh`, and use absolute paths or `git -C <dir>`.
+- **Cloud session with two repositories:** it starts in the directory above the clones, with each clone on its default branch, and loads no hooks, permission rules, `env` or MCP servers from either repo's `.claude/settings.json`; plugins come from the environment's setup script (spec F14, F19). So nothing bootstraps itself: run `scripts/bootstrap.sh`, and use absolute paths or `git -C <dir>`.
+- **An idle cloud session loses its disk eventually.** The machine is paused, then reclaimed; reopening the session gives a fresh clone. Anything not pushed is gone (spec F20).
 - `mise` is installed to `$HOME/.local/bin` and the installer does not edit shell profiles. If `mise` is "not found", call `$HOME/.local/bin/mise`.
-- **GitHub from a cloud session:** tag pushes and branch deletions are rejected, and so is GraphQL, so `gh pr` and `gh issue` fail. Use REST (`gh api repos/...`). Merged phase branches stay on the remote; the operator prunes them.
+- **GitHub from a cloud session:** tag pushes and branch deletions are rejected, and so is GraphQL, so `gh pr` and `gh issue` fail. Use REST (`gh api repos/...`). Whether a push to a branch outside `claude/` is accepted is unsettled (spec F13); do not find out by trying, push only the working branch.
 - The template-placeholder check must keep printing nothing: `grep -rEn '<(project|one-line-description|toolchain|gate-steps|repo|slug)>' --exclude-dir=.git .`. Write per-phase slots as `<n>` and `<name>`, never with one of those six words.
 
 ## If you break something
 
 - Gate red: read the first failing step's output; `mise run check -- <step>` isolates it.
 - Hook blocked a commit: it is doing its job; check what you staged -- do not bypass.
-- Fresh session disoriented: `docs/progress.md` has the ledger and the how-to-resume checklist; `GOAL.md` *Session start* has the first five steps.
+- Fresh or compacted session disoriented: `docs/progress.md` has the ledger and the how-to-resume checklist; `GOAL.md` *Session start* has the first six steps.
 - CI green locally, red on GitHub: check that the `mise.toml` pins match and nothing depends on a local `mise.local.toml`.
 - Something seems to need a secret, a real host or a deploy: it does not belong to the loop. Park it under `## Blocked on user`.

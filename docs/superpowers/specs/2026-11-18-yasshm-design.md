@@ -1,7 +1,7 @@
 # yasshm v0.1 design
 
 **Date:** 2026-11-18
-**Status:** Written by the planning session at the owner's direction, from decisions the owner made in that session. The owner signs it off by starting the goal loop on the integration branch; until then the owner may edit any row.
+**Status:** Written by the planning session at the owner's direction, from decisions the owner made in that session. The owner signs it off by sending the kickoff prompt in `GOAL.md`; until then the owner may edit any row. Revised 2026-11-19: the build is one orchestrating cloud session that works on one branch per repository (section 9).
 **How to read it:** section 2 is locked (do not re-litigate). Sections 4 to 8 are the build oracle. Section 9 is the process. `GOAL.md` names the sections each phase needs; read only those.
 
 yasshm ("Yet Another SSH MCP") is a self-hosted MCP gateway that lets an AI assistant run policy-checked, audited commands on SSH hosts its operator has configured.
@@ -40,7 +40,7 @@ Source `owner` = the owner decided it. Source `planning` = the planning session 
 | D14 | Dependencies | Small and well known: the official MCP Go SDK, `golang.org/x/crypto`, an SFTP library, one pure-Go SQLite driver, one YAML library, one maintained JWT or OIDC library (token verification is never hand-rolled). Anything else needs a justification line in the implementer report and a clean vulnerability scan | Supply chain is part of the attack surface of a tool that holds SSH keys | planning |
 | D15 | Tests | Every test that can run without the real edge or a real target is automated and in the gate: unit, integration (in-process SSH server, a real `sshd` process, a local token issuer, real SQLite), end to end (the real binary driven by a real MCP client through a fake edge). Coverage floor 85 percent | Owner: every unit, integration and end-to-end test that is possible to implement | owner, planning (floor) |
 | D16 | No live deploy in the loop | The build loop never deploys, never reaches a real target or the real edge, and never needs a secret. Live checks are operator manual tests (`test/manual/MT-*.md`) run after an attended deployment | The build session has no access to the target and no password-manager login | owner |
-| D17 | Infra changes | Deployment support lives in the operator's private infra repository, on a branch with the same name as this repo's integration branch. The loop prepares it and validates it statically. It never applies it | Owner | owner |
+| D17 | Infra changes | Deployment support lives in the operator's private infra repository, on the build session's working branch there. The session prepares it and validates it statically. It never applies it | Owner | owner |
 | D18 | Cut from v0.1 | Tenant self-service, message queue, object storage, web UI, Kubernetes packaging, dashboards, interactive sessions, SSH certificates, a metrics endpoint | The trimmed plan. Section 10 lists what may come back | owner |
 
 ## 3. Verified external facts
@@ -61,12 +61,14 @@ Status is CONFIRMED (read in a primary source or observed, on the date shown), I
 | F10 | OpenSSH honours the SSH `signal` channel request since 7.9 for command sessions that are not under a forced command, and delivers it to the session's process group | INFERRED | recalled from OpenSSH release notes and `session.c` | Phase 2 premise, then the real-`sshd` lane |
 | F11 | A cloud build sandbox can install the toolchain with `scripts/bootstrap.sh` (mise from `mise.run`, Go from `dl.google.com`), and the template gate runs green there in about 10 seconds | CONFIRMED | observed in the planning sandbox | Phase 0 |
 | F12 | The sandbox has no `ssh` or `sshd` binary and no running Docker daemon. Whether `apt-get install -y openssh-server` works there, whether `sshd` can then run on a loopback port, and whether `govulncheck` can reach its database are unknown | CONFIRMED (absence), TODO (the rest) | observed in the planning sandbox | Phase 0 premise |
-| F13 | In a cloud session the GitHub proxy rejects tag pushes and branch deletions and rejects GraphQL, so `gh pr` and `gh issue` fail; REST works (`gh api repos/...`). It does not restrict which branches a push may update | CONFIRMED | Claude Code cloud-session docs | Phase 0 |
+| F13 | In a cloud session the GitHub proxy rejects tag pushes and branch deletions and rejects GraphQL, so `gh pr` and `gh issue` fail; REST works (`gh api repos/...`). The vendor docs say the proxy does not limit which branches a push may update; the operator's experience is that a session can only push branches under a `claude/` prefix. The design needs neither to be true: a session pushes exactly one branch per repository, the one it was started on | CONFIRMED (tags, deletions, GraphQL), TODO (whether pushes are limited to a prefix) | `https://code.claude.com/docs/en/cloud-environments.md`, "GitHub proxy", re-read 2026-11-19 | Phase 0 (observe, do not probe) |
 | F14 | A cloud session with several repositories starts in the directory above the clones and loads no hooks, permission rules or `env` from any repository's `.claude/settings.json`. Plugins declared there do not load; they come from the environment's setup script. Each repository's `CLAUDE.md` still applies | CONFIRMED | `https://code.claude.com/docs/en/settings.md`, "Settings in cloud sessions" | Phase 0 |
 | F15 | The edge closes a proxied request whose origin sends nothing for about 100 seconds | INFERRED | recalled Cloudflare proxy read timeout | Phase 5 premise; manual test MT-003 |
 | F16 | No maintained open-source project already covers the locked scope | INFERRED | planning-session survey, not re-run | Phase 0 premise (15 minutes) |
 | F17 | Go 1.27.4 and golangci-lint 2.15.0 are the current releases and install through mise | CONFIRMED | installed in the planning sandbox | -- |
 | F18 | Candidate pure-Go SQLite drivers are `modernc.org/sqlite` and `github.com/ncruces/go-sqlite3`; candidate YAML libraries are `go.yaml.in/yaml` and `github.com/goccy/go-yaml` | INFERRED | recalled | Phase 1 (YAML), Phase 3 (SQLite): pick one, record why |
+| F19 | A cloud session with several repositories starts every clone on its default branch; a branch cannot be chosen per repository | INFERRED | the operator's observation in the desktop app, 2026-11-19; not in the docs | Phase 0 |
+| F20 | An idle session's machine is paused with its files and can later be reclaimed; a reopened session gets a fresh machine and a fresh clone, so only pushed commits are safe | CONFIRMED (pause, reclaim, fresh machine), INFERRED (unpushed commits are lost) | `https://code.claude.com/docs/en/cloud-environments.md` and `https://code.claude.com/docs/en/claude-code-on-the-web.md`, read 2026-11-19 | -- |
 
 ## 4. Architecture
 
@@ -248,7 +250,7 @@ Every tool returns structured content and a text rendering. Failures the model s
 
 **Test names** carry the taxonomy as the first subtest path element (`happy/`, `sad/`, `raging/`, `edge/`, `corner/`), so `go test -run '/sad/'` selects a class.
 
-**CI** (`.github/workflows/ci.yml`) runs the same gate on every push to `main`, `feat/**` and `phase-*/**` and on pull requests. Read its result with REST (F13): `gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`.
+**CI** (`.github/workflows/ci.yml`) runs the same gate on every push to any branch and on pull requests. Read its result with REST (F13): `gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`.
 
 **Release.** `mise run build` writes `dist/yasshm_<version>_linux_<arch>` and `dist/SHA256SUMS`, built with `-trimpath` and version metadata. A `release.yml` workflow (Phase 7) builds the same files on a `v*` tag and attaches them to a GitHub release, with SHA-pinned actions and write permission only in that job. Pushing the tag is an attended step (F13, and because a release is the operator's call).
 
@@ -268,15 +270,15 @@ What yasshm needs from the machine it runs on. Phase 7 ships these as examples u
 
 ## 9. Process
 
-**The loop.** One `/goal` run ships one phase: verify the premise, implement on a phase branch with one implementer, run the four-lane gate (code review, simplification and security in parallel and read-only, then QA, the only lane that runs the gate), triage into one fix commit, re-gate, merge, ship, and retarget `GOAL.md`. `GOAL.md` and `CLAUDE.md` carry the rules; this section fixes what is specific to yasshm.
+**The loop.** One cloud session, started once, runs the whole approved roadmap. Its lead is an orchestrator: for each phase it verifies the premise, opens the phase with a start commit, dispatches one implementer, runs the four-lane gate (code review, simplification and security in parallel and read-only, then QA, the only lane that runs the gate), triages into one fix commit, re-gates, closes the phase with a ship commit, retargets `GOAL.md`, and goes on to the next phase. It writes no product code itself. `GOAL.md` and `CLAUDE.md` carry the rules; this section fixes what is specific to yasshm.
 
-**Branch model.** The integration branch is `feat/yasshm-mvp`, and it exists under that name in both repositories. In this loop it plays the part the generic work orders call `main`: phase branches `phase-<n>/<name>` fork from it and merge into it with `--no-ff`. The loop never pushes to `main` here or to the default branch of the infra repository, never force-pushes, and never deletes a branch. Merging the integration branches, tagging a release, deploying and the history scrub are the operator's, with the lead parked under `Blocked on user`.
+**Branch model.** A session that holds several repositories starts every clone on its default branch (F19), and the only push it can count on is to its own working branch (F13). So the plan lives on `feat/yasshm-mvp` in both repositories and the session merges that into its working branch once, at kickoff; it never pushes to the plan branch. There are no phase branches and no merges: a phase is a commit range on the working branch, from its start commit (`docs(phase-<n>): start <name>`) to its ship commit (`docs(phase-<n>): ship <name>`), and the review lanes diff that range. The working branch is pushed after every green commit, because an idle session's machine can be reclaimed (F20). Nothing else is ever pushed: not `main`, not the infra repository's default branch, not the plan branch, no tag, no force-push, no deletion. Merging the working branches, tagging a release, deploying and the history scrub are the operator's, with the lead parked under `Blocked on user`.
 
 **Phases.** `GOAL.md` holds the live table and its status. The plan each row comes from:
 
 | Phase | Builds | Architecture delta | Acceptance beyond "gate green on a clean tree" |
 |---|---|---|---|
-| 0 Scaffold | Go module, `cmd/yasshm` with `version`, the full gate of section 7, `mise` tasks (`build`, `test`, `lint`, `fuzz`), dirty tree becomes a failure, sandbox facts F12 and F16 settled | none | Each gate step runs alone; a skipped test without an issue link fails `skipcheck`; a total under the floor fails `cover`; CI is green on the phase branch |
+| 0 Scaffold | Go module, `cmd/yasshm` with `version`, the full gate of section 7, `mise` tasks (`build`, `test`, `lint`, `fuzz`), dirty tree becomes a failure, sandbox facts F12 and F16 settled | none | Each gate step runs alone; a skipped test without an issue link fails `skipcheck`; a total under the floor fails `cover`; CI is green on the pushed head |
 | 1 Config, tenants, policy, audit | 5.1 to 5.4, `yasshm config check` | `yasshm.config`, `yasshm.policy`, `yasshm.audit` lose `#planned` | Every validation rule and every denylist pattern has a passing and a failing case; `full` is rejected by the loader and accepted by the policy engine in a code-built grant; audit-before-act proven with an unwritable file; fuzz targets for decoder and guard rails |
 | 2 SSH layer | 5.5, `testkit/sshtest`, `testkit/realsshd`, the SSH contract suite | `yasshm.ssh` loses `#planned` | The contract suite passes against both servers (or the CI-only arrangement of section 7 is in place); F10 is CONFIRMED or corrected; no test needs the network |
 | 3 Jobs, store, outputs | 5.6 | `yasshm.jobs`, `yasshm.store`, `yasshm.outputs` lose `#planned` | Every status is reachable in a test; restart recovery, truncation, retention, concurrency limits and tenant filtering are proven; no goroutine leaks |
@@ -284,14 +286,14 @@ What yasshm needs from the machine it runs on. Phase 7 ships these as examples u
 | 5 MCP endpoint and tools | 5.8, 5.9 `serve`, `testkit/edgetest` | `yasshm.tools`, `yasshm.http` lose `#planned` | Each tool has happy, sad and raging cases through the real handler; F6 and F15 are settled; nothing from the config leaks through any tool (asserted on the serialized results) |
 | 6 End-to-end and hardening | `test/e2e`, the scenarios of section 7, fuzz run, goroutine and file-descriptor leak checks, a review of section 6 against the code | none | Every scenario exists and passes against the real binary; each guarantee in section 6 names the test that proves it |
 | 7 Packaging and operator docs | `deploy/` (unit, example config), `mise run build` release files, `release.yml`, the operator guide, `SECURITY.md` threat model, `test/manual/MT-001` to `MT-005`, the README | none | `yasshm config check` passes on the shipped example config with a generated key; `systemd-analyze verify` passes on the unit where the tool exists; the manual tests are in the agent-ops format and none has been run by the loop |
-| 8 Infra deployment support | In the private infra repository, on its `feat/yasshm-mvp`: everything section 8 needs as infrastructure as code, following that repository's own plan document and rules | none here | That repository's static checks that need no secret and no cluster pass; nothing was applied; its plan document lists the attended steps in order |
+| 8 Infra deployment support | In the private infra repository, on the session's working branch there: everything section 8 needs as infrastructure as code, following that repository's own plan document and rules | none here | That repository's static checks that need no secret and no cluster pass; nothing was applied; its plan document lists the attended steps in order |
 | 9 History scrub | Attended, always last | none | See `GOAL.md` |
 
-**Models.** Implementer and reviewers per phase are in the `GOAL.md` roadmap. The rule: reviewers are one tier above the implementer. Phases that touch a trust boundary or concurrency (1 to 6, and 8) use the higher pair (opus implements, fable reviews); 0 and 7 use sonnet and opus.
+**Models.** The orchestrator runs on fable. Implementer and reviewers per phase are in the `GOAL.md` roadmap. The rule: reviewers are one tier above the implementer. Phases that touch a trust boundary or concurrency (1 to 6, and 8) use the higher pair (opus implements, fable reviews); 0 and 7 use sonnet and opus.
 
-**What the loop can never do** (D16, D17): deploy, apply infrastructure, reach a real target or the real edge, log in to a password manager, read or request a secret, run a manual test, push a tag, or merge into a default branch. No phase's done criteria may depend on any of them.
+**What the loop can never do** (D16, D17): deploy, apply infrastructure, reach a real target or the real edge, log in to a password manager, read or request a secret, run a manual test, push a tag, push any branch other than its working branch, or merge into a default branch. No phase's done criteria may depend on any of them.
 
-**Done for the MVP:** phases 0 to 8 merged into the integration branches, CI green, and the lead parked with the operator's ordered list: review and merge both integration branches, tag `v0.1.0`, deploy, run MT-001 to MT-005, then Phase 9.
+**Done for the MVP:** phases 0 to 8 shipped on the two working branches, CI green, and the lead parked with the operator's ordered list: review and merge both working branches, tag `v0.1.0`, deploy, run MT-001 to MT-005, then Phase 9.
 
 ## 10. Future work
 

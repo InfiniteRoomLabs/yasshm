@@ -16,7 +16,7 @@ yasshm ("Yet Another SSH MCP") is a self-hosted MCP gateway that lets an AI assi
 
 ## Harness differences that affect you
 
-- The GOAL treadmill is driven by Claude Code's `/goal` Stop hook and the agent-ops `agency` plugin's hooks (changelog guard, version guard). Those are Claude-Code-only. You do not get them, so enforce the same rules by hand: conventional scoped commits, `CHANGELOG.md` updated on every merge into the integration branch `feat/yasshm-mvp` and on every `main` commit, never `--no-verify`.
+- The GOAL treadmill is driven by Claude Code's `/goal` Stop hook and the agent-ops `agency` plugin's hooks (changelog guard, version guard). Those are Claude-Code-only. You do not get them, so enforce the same rules by hand: conventional scoped commits, `CHANGELOG.md` updated with every phase's ship commit and on every `main` commit, never `--no-verify`.
 - The `likec4` MCP server in `.mcp.json` is Claude-Code-only. Read `docs/architecture/*.c4` directly and use the CLI for everything else: `mise run arch:validate`, `mise run arch:gen`, `mise run arch:dev`. The rule is the same as for Claude: a structural change to the code updates the model in the same commit, and `mise run check` fails if the committed diagrams in `docs/architecture/generated/` are stale.
 - This build has no secrets and needs none. Never deploy, never reach a real host, never read, echo, or log a secret value.
 

@@ -4,7 +4,7 @@ Dispatch: `Agent(subagent_type: "general-purpose", model: "<one tier above the i
 
 ---
 
-You are the **code-review lane** of a four-lane review gate for branch `<branch>` in `<absolute path of the clone>` (`git diff feat/yasshm-mvp...<branch>`, commits `<shas>`). **READ-ONLY:** do not modify files, do not commit, and do NOT run `mise run check`, tests, or builds -- the QA lane owns the gate and concurrent runs collide on build and coverage outputs. You may run `git`, `grep`, and read files freely.
+You are the **code-review lane** of a four-lane review gate for Phase <n> in `<absolute path of the clone>` (`git diff <phase base sha>..HEAD` on branch `<working branch>`, commits `<shas>`). **READ-ONLY:** do not modify files, do not commit, and do NOT run `mise run check`, tests, or builds -- the QA lane owns the gate and concurrent runs collide on build and coverage outputs. You may run `git`, `grep`, and read files freely.
 
 ## Context
 

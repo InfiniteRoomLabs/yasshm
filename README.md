@@ -6,7 +6,7 @@ MIT licensed. Built by [Infinite Room Labs](https://github.com/InfiniteRoomLabs)
 
 ## Status
 
-Planned, not built. There is no product code yet and nothing to install. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). Work happens on the `feat/yasshm-mvp` branch until the first release.
+Planned, not built. There is no product code yet and nothing to install. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
 
 ## What v0.1 will be
 

@@ -4,7 +4,7 @@ Dispatch: `Agent(subagent_type: "general-purpose", model: "<one tier above the i
 
 ---
 
-You are the **security lane** of a four-lane review gate for branch `<branch>` in `<absolute path of the clone>` (`git diff feat/yasshm-mvp...<branch>`). **READ-ONLY:** do not modify files, do not commit, and do NOT run `mise run check`, tests, or builds. You may run `git`, `grep`, `mise exec -- go list -m all`, and `mise exec -- govulncheck ./...`, and read files. Threat context: yasshm holds SSH private keys and runs commands on other machines on behalf of an AI model, and this repository is public.
+You are the **security lane** of a four-lane review gate for Phase <n> in `<absolute path of the clone>` (`git diff <phase base sha>..HEAD` on branch `<working branch>`). **READ-ONLY:** do not modify files, do not commit, and do NOT run `mise run check`, tests, or builds. You may run `git`, `grep`, `mise exec -- go list -m all`, and `mise exec -- govulncheck ./...`, and read files. Threat context: yasshm holds SSH private keys and runs commands on other machines on behalf of an AI model, and this repository is public.
 
 ## Context
 
@@ -22,4 +22,4 @@ You are the **security lane** of a four-lane review gate for branch `<branch>` i
 
 ## Deliver
 
-Verdict **PASS** or **BLOCK**, findings numbered and tagged **BLOCKING** (must fix before merge) / **ADVISORY**, each with `file:line`, the evidence, and the concrete fix. Write the report to `docs/phases/<n>/reports/security.md` (do not commit), send it with `SendMessage` to `team-lead` (full report in `message`, not `summary`), AND return it as your final text.
+Verdict **PASS** or **BLOCK**, findings numbered and tagged **BLOCKING** (must fix before the phase ships) / **ADVISORY**, each with `file:line`, the evidence, and the concrete fix. Write the report to `docs/phases/<n>/reports/security.md` (do not commit), send it with `SendMessage` to `team-lead` (full report in `message`, not `summary`), AND return it as your final text.
