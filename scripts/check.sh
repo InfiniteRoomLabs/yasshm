@@ -62,6 +62,42 @@ run_test() {
   (cd "$repo_root" && mise run test)
 }
 
+# The real-sshd half of the SSH contract suite (spec section 7). Its tests are
+# named TestRealSSHD*. With sshd present they run verbosely with
+# YASSHM_REQUIRE_SSHD=1 (so a missing binary fails instead of returning), and
+# the step fails unless at least one real-sshd subtest reports PASS: "ran
+# zero tests" cannot pass. Without sshd it prints one line, unless
+# YASSHM_REQUIRE_SSHD=1 (CI), where it fails.
+run_sshd() {
+  echo "== sshd =="
+  if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+    if [ "${YASSHM_REQUIRE_SSHD:-}" = "1" ]; then
+      echo "sshd: YASSHM_REQUIRE_SSHD=1 but sshd is not installed" >&2
+      exit 1
+    fi
+    echo "check.sh: sshd is not installed here; the real-sshd lane runs in CI only (spec section 7)"
+    return 0
+  fi
+  local log
+  log=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$log'" RETURN
+  if ! (cd "$repo_root" && YASSHM_REQUIRE_SSHD=1 CGO_ENABLED=1 mise exec -- go test -race -shuffle=on -count=1 -v -run '^TestRealSSHD' ./...) >"$log" 2>&1; then
+    cat "$log"
+    echo "sshd: the real-sshd tests failed" >&2
+    exit 1
+  fi
+  grep -E '^[[:space:]]*--- (PASS|FAIL)' "$log" || true
+  local passed
+  passed=$(grep -cE '^[[:space:]]*--- PASS: TestRealSSHD[^ ]*/' "$log" || true)
+  if [ "${passed:-0}" -lt 1 ]; then
+    cat "$log"
+    echo "sshd: no real-sshd scenario reported PASS" >&2
+    exit 1
+  fi
+  echo "sshd: $passed real-sshd scenarios passed"
+}
+
 run_cover() {
   echo "== cover =="
   if [ ! -s "$coverage_profile" ]; then
@@ -120,7 +156,7 @@ run_arch() {
   # when this project has a Node test runner.
 }
 
-steps=(fmt lint skipcheck test cover vuln build arch)
+steps=(fmt lint skipcheck test sshd cover vuln build arch)
 
 run_step() {
   case "$1" in
@@ -128,6 +164,7 @@ run_step() {
   lint) run_lint ;;
   skipcheck) run_skipcheck ;;
   test) run_test ;;
+  sshd) run_sshd ;;
   cover) run_cover ;;
   vuln) run_vuln ;;
   build) run_build ;;
@@ -143,10 +180,6 @@ if [ "$step" = "all" ]; then
   for s in "${steps[@]}"; do run_step "$s"; done
 else
   run_step "$step"
-fi
-
-if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
-  echo "check.sh: sshd is not installed here; the real-sshd lane runs in CI only (spec section 7)"
 fi
 
 dirty=$(cd "$repo_root" && git status --porcelain)

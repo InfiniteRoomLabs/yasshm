@@ -36,4 +36,9 @@ jobs:
           export PATH="$PATH:/usr/sbin"
           command -v sshd || (sudo apt-get update && sudo apt-get install -y openssh-server)
           command -v sshd
-      - run: mise run check
+      # With YASSHM_REQUIRE_SSHD=1 the gate's sshd step and every real-sshd
+      # test fail when sshd is missing, instead of returning early.
+      - name: mise run check
+        run: mise run check
+        env:
+          YASSHM_REQUIRE_SSHD: "1"
