@@ -161,23 +161,23 @@ func KnownHosts(file, host string, port int) (*Pinned, error) {
 		return nil, &Error{Msg: "lists no key for " + addr}
 	}
 	p := &Pinned{}
+	plain := 0
 	for _, k := range ke.Want {
 		if _, isCert := k.Key.(*ssh.Certificate); isCert {
 			continue
 		}
+		plain++
 		if cb(addr, remote, k.Key) == nil {
 			p.keys = append(p.keys, k.Key)
 		}
+	}
+	if plain == 0 {
+		return nil, &Error{Msg: "lists only certificates for " + addr + "; SSH certificates are not supported in this version"}
 	}
 	if len(p.keys) == 0 {
 		return nil, &Error{Msg: "lists only revoked keys for " + addr}
 	}
 	return p, nil
-}
-
-// Keys returns the pinned keys.
-func (p *Pinned) Keys() []ssh.PublicKey {
-	return append([]ssh.PublicKey(nil), p.keys...)
 }
 
 // Algorithms returns the host key algorithms that can verify a pinned key,
@@ -204,15 +204,9 @@ func (p *Pinned) Algorithms() []string {
 	return out
 }
 
-// Callback returns a host key callback that accepts exactly the pinned keys.
-// Anything else, a certificate included, is a *MismatchError.
-func (p *Pinned) Callback() ssh.HostKeyCallback {
-	return func(_ string, _ net.Addr, key ssh.PublicKey) error {
-		return p.Check(key)
-	}
-}
-
 // Check reports whether key is pinned; if not, it returns a *MismatchError.
+// A certificate is never pinned. The SSH layer calls it from its host key
+// callback.
 func (p *Pinned) Check(key ssh.PublicKey) error {
 	if key == nil {
 		return &MismatchError{Fingerprint: "none"}

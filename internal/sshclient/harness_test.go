@@ -28,14 +28,11 @@ const testTenant tenant.TenantID = "t1"
 
 // target is one SSH server the contract suite runs against.
 type target struct {
-	name string
-	real bool
-	tid  tenant.TenantID
-	srv  *tenant.Server
+	tid tenant.TenantID
+	srv *tenant.Server
 	// dir is an absolute directory on the target (the same machine) for
 	// SFTP files and pid files.
-	dir  string
-	user string
+	dir string
 	// runsAs is the account commands run as on the target.
 	runsAs string
 	// hostKey is the key the server presents.
@@ -47,6 +44,17 @@ type target struct {
 	st *sshtest.Server
 	// banner is the server's version line.
 	banner string
+	// leftovers returns the pids of processes the server's sessions started
+	// that still run.
+	leftovers func() []int
+}
+
+// full returns a copy of the target's server that grants full access, for
+// Upload.
+func (tg target) full() *tenant.Server {
+	srv := *tg.srv
+	srv.Access = tenant.AccessFull
+	return &srv
 }
 
 func keyLine(pk ssh.PublicKey) string {
@@ -58,8 +66,7 @@ func newSSHTest(t *testing.T, o sshtest.Options) target {
 	t.Helper()
 	s := sshtest.Start(t, o)
 	return target{
-		name: "sshtest",
-		tid:  testTenant,
+		tid: testTenant,
 		srv: &tenant.Server{
 			Tenant:   testTenant,
 			ID:       "srv-1",
@@ -70,12 +77,20 @@ func newSSHTest(t *testing.T, o sshtest.Options) target {
 			Access:   tenant.AccessLook,
 		},
 		dir:     s.Root,
-		user:    s.User,
 		runsAs:  currentUser(t),
 		hostKey: s.OfferedKey,
 		conns:   s.Conns,
 		st:      s,
 		banner:  "SSH-2.0-yasshm-sshtest",
+		leftovers: func() []int {
+			var out []int
+			for _, pid := range s.Pids() {
+				if alive(pid) {
+					out = append(out, pid)
+				}
+			}
+			return out
+		},
 	}
 }
 
@@ -84,23 +99,21 @@ func newReal(t *testing.T) target {
 	t.Helper()
 	s := realsshd.Start(t)
 	return target{
-		name: "realsshd",
-		real: true,
-		tid:  testTenant,
+		tid: testTenant,
 		srv: &tenant.Server{
 			Tenant:   testTenant,
 			ID:       "srv-real",
 			Host:     s.Host,
 			Port:     s.Port,
 			Identity: tenant.Identity{ID: "look", User: s.User, PrivateKeyFile: s.ClientKeyFile},
-			HostKey:  s.HostKeyLine(),
+			HostKey:  keyLine(s.HostKey),
 			Access:   tenant.AccessLook,
 		},
-		dir:     t.TempDir(),
-		user:    s.User,
-		runsAs:  s.User,
-		hostKey: s.HostKey,
-		banner:  s.Banner,
+		dir:       t.TempDir(),
+		runsAs:    s.User,
+		hostKey:   s.HostKey,
+		banner:    s.Banner,
+		leftovers: s.Leftovers,
 	}
 }
 
@@ -296,7 +309,7 @@ func writeKeyFile(t *testing.T) string {
 }
 
 // otherHostKey returns a new public key in authorized_keys form.
-func otherHostKey(t *testing.T) (string, ssh.PublicKey) {
+func otherHostKey(t *testing.T) string {
 	t.Helper()
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -306,5 +319,31 @@ func otherHostKey(t *testing.T) (string, ssh.PublicKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return keyLine(pk), pk
+	return keyLine(pk)
+}
+
+// checkNoLeftovers registers a cleanup, run after every later cleanup, that
+// fails when a process started by the target's sessions still runs.
+func checkNoLeftovers(t *testing.T, tg *target) {
+	t.Helper()
+	t.Cleanup(func() {
+		if tg.leftovers == nil {
+			return
+		}
+		var left []int
+		if !poll(5*time.Second, func() bool { left = tg.leftovers(); return len(left) == 0 }) {
+			t.Errorf("processes left behind: %v", left)
+		}
+	})
+}
+
+// noHostIn fails when msg names the server's host, port, login user or key
+// path.
+func noHostIn(t *testing.T, srv *tenant.Server, msg string) {
+	t.Helper()
+	for _, s := range []string{srv.Host, ":" + strconv.Itoa(srv.Port), strconv.Itoa(srv.Port), srv.Identity.User, srv.Identity.PrivateKeyFile, srv.KnownHostsFile} {
+		if s != "" && strings.Contains(msg, s) {
+			t.Fatalf("message %q names %q", msg, s)
+		}
+	}
 }

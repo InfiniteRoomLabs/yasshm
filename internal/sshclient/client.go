@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func checkServer(tid tenant.TenantID, srv *tenant.Server, op string) error {
 // pin builds the accepted host key set for srv. A problem with the pinned
 // key or the known_hosts content is CodeHostKeyMismatch (no key can be
 // accepted, so the target is not spoken to); a known_hosts file that cannot
-// be read is CodeInternal.
+// be read is CodeInternal. The messages are fixed text.
 func pin(srv *tenant.Server, port int, op string) (*hostkey.Pinned, error) {
 	var (
 		p   *hostkey.Pinned
@@ -125,28 +126,45 @@ func pin(srv *tenant.Server, port int, op string) (*hostkey.Pinned, error) {
 		return nil, newErr(CodeHostKeyMismatch, srv.ID, op, "the server pins no host key", nil, nil)
 	}
 	if err != nil {
+		// The hostkey messages can name the host and port (spec D8): they
+		// stay in the cause, for Detail and operator logs only.
 		var he *hostkey.Error
-		if errors.As(err, &he) {
-			return nil, newErr(CodeHostKeyMismatch, srv.ID, op, "the pinned host key cannot be used: "+he.Msg, nil, err)
+		switch {
+		case errors.As(err, &he) && srv.HostKey != "":
+			return nil, newErr(CodeHostKeyMismatch, srv.ID, op, "the pinned host key cannot be used", nil, err)
+		case errors.As(err, &he):
+			return nil, newErr(CodeHostKeyMismatch, srv.ID, op, "the pinned known_hosts file has no usable key for this server", nil, err)
 		}
-		return nil, newErr(CodeInternal, srv.ID, op, "the known_hosts file cannot be read", nil, err)
+		return nil, newErr(CodeInternal, srv.ID, op, "the pinned known_hosts file cannot be read", nil, err)
 	}
 	return p, nil
 }
 
 // loadSigner reads the identity's private key through keyfile (which
-// re-checks the file), parses it and clears the bytes. No message carries
-// the path or the key.
+// re-checks the file), parses it and clears the bytes. The messages are
+// fixed text: no path, mode, uid or key; the keyfile error stays in the
+// cause for operator logs.
 func loadSigner(file string, server tenant.ServerID, op string) (ssh.Signer, error) {
 	b, err := keyfile.Read(file)
 	if err != nil {
-		msg := "the identity's private key file cannot be read"
-		var me *keyfile.ModeError
-		var oe *keyfile.OwnerError
-		if errors.Is(err, keyfile.ErrNotRegular) || errors.Is(err, keyfile.ErrTooLarge) || errors.As(err, &me) || errors.As(err, &oe) {
-			msg = "the identity's private key file " + err.Error()
+		var (
+			me  *keyfile.ModeError
+			oe  *keyfile.OwnerError
+			msg string
+		)
+		switch {
+		case errors.As(err, &me):
+			msg = "the identity's private key file is accessible by group or other"
+		case errors.As(err, &oe):
+			msg = "the identity's private key file is not owned by the gateway's user"
+		case errors.Is(err, keyfile.ErrNotRegular):
+			msg = "the identity's private key file is not a regular file"
+		case errors.Is(err, keyfile.ErrTooLarge):
+			msg = "the identity's private key file is too large to be a private key"
+		default:
+			msg = "the identity's private key file cannot be read"
 		}
-		return nil, newErr(CodeInternal, server, op, msg, nil, nil)
+		return nil, newErr(CodeInternal, server, op, msg, nil, err)
 	}
 	defer clear(b)
 	sg, err := ssh.ParsePrivateKey(b)
@@ -165,6 +183,11 @@ func (c *Client) dial(ctx context.Context, tid tenant.TenantID, srv *tenant.Serv
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, ctxErr(srv.ID, op, err)
+	}
+	// Defense in depth: the policy engine decides first, but the SSH layer
+	// never connects for a level the server does not grant.
+	if !tenant.Permits(srv.Access, level) {
+		return nil, newErr(CodeInternal, srv.ID, op, ErrAccessLevel.Error(), ErrAccessLevel, nil)
 	}
 	port := srv.Port
 	if port == 0 {
@@ -194,12 +217,13 @@ func (c *Client) dial(ctx context.Context, tid tenant.TenantID, srv *tenant.Serv
 		}
 		return nil, newErr(CodeUnreachable, srv.ID, op, "the TCP connection failed", nil, err)
 	}
-	// The handshake has no context; closing the conn is how ctx ends it.
+	// The handshake has no context; closing the conn is how ctx and the
+	// connect timeout end it.
 	stop := context.AfterFunc(dctx, func() { _ = nc.Close() })
-	if dl, ok := dctx.Deadline(); ok {
-		_ = nc.SetDeadline(dl)
-	}
-	var mismatch *hostkey.MismatchError
+	var (
+		mismatch *hostkey.MismatchError
+		keyOK    bool
+	)
 	cfg := &ssh.ClientConfig{
 		User: id.User,
 		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
@@ -207,6 +231,8 @@ func (c *Client) dial(ctx context.Context, tid tenant.TenantID, srv *tenant.Serv
 			cerr := pinned.Check(key)
 			if cerr != nil {
 				errors.As(cerr, &mismatch)
+			} else {
+				keyOK = true
 			}
 			return cerr
 		},
@@ -220,26 +246,32 @@ func (c *Client) dial(ctx context.Context, tid tenant.TenantID, srv *tenant.Serv
 	}
 	if err != nil {
 		_ = nc.Close()
-		return nil, handshakeErr(ctx, srv.ID, op, err, mismatch)
+		return nil, handshakeErr(ctx, srv.ID, op, err, mismatch, keyOK)
 	}
-	_ = nc.SetDeadline(time.Time{})
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
-// handshakeErr classifies a failed handshake.
-func handshakeErr(ctx context.Context, server tenant.ServerID, op string, err error, mismatch *hostkey.MismatchError) error {
+// handshakeErr classifies a failed handshake. keyOK says the host key
+// callback accepted the server's key: only then can a failure be the
+// server refusing our key, since before that the peer is unverified and
+// its disconnect text proves nothing.
+func handshakeErr(ctx context.Context, server tenant.ServerID, op string, err error, mismatch *hostkey.MismatchError, keyOK bool) error {
+	var ane *ssh.AlgorithmNegotiationError
 	switch {
 	case mismatch != nil:
 		e := newErr(CodeHostKeyMismatch, server, op, mismatch.Error(), nil, err)
 		e.fingerprint = mismatch.Fingerprint
 		return e
+	case errors.As(err, &ane) && ane.What == "host key":
+		// The server offered no host key of a pinned type: a changed key.
+		return newErr(CodeHostKeyMismatch, server, op, "the server offered no host key of a pinned type", nil, err)
 	case ctx.Err() != nil:
 		return ctxErr(server, op, ctx.Err())
 	case pastDeadline(ctx):
 		// The conn deadline, set to the caller's deadline, can fire a moment
 		// before the context's own timer marks it done.
 		return ctxErr(server, op, context.DeadlineExceeded)
-	case strings.Contains(err.Error(), "ssh: unable to authenticate"):
+	case keyOK && strings.Contains(err.Error(), "ssh: unable to authenticate"):
 		// x/crypto has no typed client-side auth error; this text is pinned
 		// by a test against both servers.
 		return newErr(CodeAuthFailed, server, op, "the server refused the identity's key", nil, err)
@@ -262,5 +294,16 @@ var signalNames = map[string]bool{"TERM": true, "KILL": true, "INT": true, "HUP"
 // TERM, KILL, INT, HUP, QUIT, USR1 or USR2, without the SIG prefix.
 func ValidSignal(name string) bool { return signalNames[name] }
 
-// trimSig removes a SIG prefix from a signal name a server sent.
-func trimSig(name string) string { return strings.TrimPrefix(name, "SIG") }
+// signalNamePattern is what a signal name from a server must look like
+// (RFC 4254 names, without the SIG prefix); anything else is untrusted text.
+var signalNamePattern = regexp.MustCompile(`^[A-Z0-9+-]{1,16}$`)
+
+// cleanSignal returns the signal name a server sent, without a SIG prefix,
+// or "UNKNOWN" when it is not a plausible signal name.
+func cleanSignal(name string) string {
+	name = strings.TrimPrefix(name, "SIG")
+	if !signalNamePattern.MatchString(name) {
+		return "UNKNOWN"
+	}
+	return name
+}

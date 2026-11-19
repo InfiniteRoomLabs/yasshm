@@ -95,7 +95,7 @@ func parseFacts(out string) Facts {
 		case "os":
 			f.OS = strings.Trim(v, `"'`)
 		case "uptime":
-			if s, err := strconv.ParseFloat(v, 64); err == nil && s >= 0 && s < 1e10 {
+			if s, err := strconv.ParseFloat(v, 64); err == nil && s >= 0 && s < 9e9 {
 				f.Uptime = time.Duration(s * float64(time.Second))
 			}
 		case "user":

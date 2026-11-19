@@ -80,21 +80,38 @@ func fileErr(ctx context.Context, server tenant.ServerID, op, what string, err e
 // Download reads at most max bytes of the regular file at path on srv,
 // starting at offset, over SFTP. It returns the bytes, the file's size when
 // it was opened, and whether the read reached that size. It never reads
-// more than max bytes, whatever the file's size or growth. A missing file
-// matches fs.ErrNotExist; a file that is not regular, ErrNotRegular.
+// more than max bytes, whatever the file's size or growth. The path is
+// stat'ed (following a symbolic link) before it is opened, so a FIFO, a
+// device or a directory is refused with ErrNotRegular without being opened;
+// the open file is checked again. A file that reports a size of zero or
+// less (procfs, sysfs) is read until EOF, at most max bytes; size is then
+// offset plus the bytes read, and eof says whether EOF was reached. A
+// missing file matches fs.ErrNotExist.
+//
+// SFTP calls are bounded only by ctx: a caller must pass a deadline.
 func (c *Client) Download(ctx context.Context, tid tenant.TenantID, srv *tenant.Server, remotePath string, offset, maxBytes int64) (data []byte, size int64, eof bool, err error) {
 	const op = "download"
 	if cerr := checkServer(tid, srv, op); cerr != nil {
 		return nil, 0, false, cerr
 	}
 	if remotePath == "" || offset < 0 || maxBytes < 0 {
-		return nil, 0, false, newErr(CodeInternal, srv.ID, op, "the remotePath must be set and offset and max must not be negative", ErrInvalidArgument, nil)
+		return nil, 0, false, newErr(CodeInternal, srv.ID, op, "the path must be set and offset and max must not be negative", ErrInvalidArgument, nil)
 	}
 	s, err := c.openSFTP(ctx, tid, srv, tenant.AccessLook, op)
 	if err != nil {
 		return nil, 0, false, err
 	}
 	defer s.close()
+	notRegular := newErr(CodeInternal, srv.ID, op, "the path "+ErrNotRegular.Error(), ErrNotRegular, nil)
+	// Stat first: opening a FIFO blocks the server and opening a device can
+	// have side effects.
+	pre, err := s.sc.Stat(remotePath)
+	if err != nil {
+		return nil, 0, false, fileErr(ctx, srv.ID, op, "stat", err)
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, 0, false, notRegular
+	}
 	f, err := s.sc.Open(remotePath)
 	if err != nil {
 		return nil, 0, false, fileErr(ctx, srv.ID, op, "open", err)
@@ -105,20 +122,27 @@ func (c *Client) Download(ctx context.Context, tid tenant.TenantID, srv *tenant.
 		return nil, 0, false, fileErr(ctx, srv.ID, op, "stat", err)
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, 0, false, newErr(CodeInternal, srv.ID, op, "the remotePath "+ErrNotRegular.Error(), ErrNotRegular, nil)
+		return nil, 0, false, notRegular
 	}
 	size = fi.Size()
-	if offset >= size {
-		return []byte{}, size, true, nil
+	sized := size > 0
+	n := maxBytes
+	if sized {
+		if offset >= size {
+			return []byte{}, size, true, nil
+		}
+		n = min(maxBytes, size-offset)
 	}
-	n := min(maxBytes, size-offset)
 	buf := make([]byte, n)
-	k, err := f.ReadAt(buf, offset)
-	if err != nil && !errors.Is(err, io.EOF) {
+	k, err := io.ReadFull(io.NewSectionReader(f, offset, n), buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, 0, false, fileErr(ctx, srv.ID, op, "read", err)
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, 0, false, ctxErr(srv.ID, op, cerr)
+	}
+	if !sized {
+		return buf[:k], offset + int64(k), k < len(buf), nil
 	}
 	return buf[:k], size, offset+int64(k) >= size || k < len(buf), nil
 }
@@ -128,16 +152,23 @@ func (c *Client) Download(ctx context.Context, tid tenant.TenantID, srv *tenant.
 // (O_CREATE|O_EXCL) and an existing file matches fs.ErrExist. With
 // overwrite it writes a temporary file in the same directory and renames
 // it over path when the server supports posix-rename (readers never see a
-// partial file), and otherwise truncates and writes path directly. A
-// partial file it created is removed on failure. No v0.1 tool reaches it
-// (spec D5); it needs AccessFull from the server's identity seam.
+// partial file; a symbolic link at path is replaced, not followed), and
+// otherwise truncates and writes path directly. When a write fails on a
+// working connection, the file it created is removed; when the connection
+// is gone (ctx ended, link lost) the removal cannot run either, and a
+// partial file (at path without overwrite, or the hidden temporary file)
+// stays. No v0.1 tool reaches it (spec D5); it refuses a server that does
+// not grant tenant.AccessFull (ErrAccessLevel) and connects with
+// IdentityFor(full).
+//
+// SFTP calls are bounded only by ctx: a caller must pass a deadline.
 func (c *Client) Upload(ctx context.Context, tid tenant.TenantID, srv *tenant.Server, remotePath string, data []byte, mode fs.FileMode, overwrite bool) error {
 	const op = "upload"
 	if err := checkServer(tid, srv, op); err != nil {
 		return err
 	}
 	if remotePath == "" || mode&^fs.ModePerm != 0 {
-		return newErr(CodeInternal, srv.ID, op, "the remotePath must be set and the mode must be permission bits only", ErrInvalidArgument, nil)
+		return newErr(CodeInternal, srv.ID, op, "the path must be set and the mode must be permission bits only", ErrInvalidArgument, nil)
 	}
 	s, err := c.openSFTP(ctx, tid, srv, tenant.AccessFull, op)
 	if err != nil {
@@ -148,10 +179,7 @@ func (c *Client) Upload(ctx context.Context, tid tenant.TenantID, srv *tenant.Se
 		return fileErr(ctx, srv.ID, op, "create", writeNew(s.sc, remotePath, data, mode))
 	}
 	if _, ok := s.sc.HasExtension(posixRename); ok {
-		tmp, terr := tempName(remotePath)
-		if terr != nil {
-			return newErr(CodeInternal, srv.ID, op, "no random name", nil, terr)
-		}
+		tmp := tempName(remotePath)
 		if werr := writeNew(s.sc, tmp, data, mode); werr != nil {
 			return fileErr(ctx, srv.ID, op, "create", werr)
 		}
@@ -203,11 +231,10 @@ func fill(f *sftp.File, data []byte, mode fs.FileMode) error {
 	return err
 }
 
-// tempName returns a random hidden name next to p.
-func tempName(p string) (string, error) {
+// tempName returns a random hidden name next to p. crypto/rand.Read never
+// fails (since Go 1.24 it aborts the process instead).
+func tempName(p string) string {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return path.Join(path.Dir(p), "."+path.Base(p)+".yasshm-"+hex.EncodeToString(b[:])), nil
+	_, _ = rand.Read(b[:])
+	return path.Join(path.Dir(p), "."+path.Base(p)+".yasshm-"+hex.EncodeToString(b[:]))
 }

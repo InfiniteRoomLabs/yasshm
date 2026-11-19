@@ -64,10 +64,13 @@ run_test() {
 
 # The real-sshd half of the SSH contract suite (spec section 7). Its tests are
 # named TestRealSSHD*. With sshd present they run verbosely with
-# YASSHM_REQUIRE_SSHD=1 (so a missing binary fails instead of returning), and
-# the step fails unless at least one real-sshd subtest reports PASS: "ran
-# zero tests" cannot pass. Without sshd it prints one line, unless
-# YASSHM_REQUIRE_SSHD=1 (CI), where it fails.
+# YASSHM_REQUIRE_SSHD=1 (so a missing binary fails instead of returning),
+# together with the in-process half (TestContractSSHTest) in the same run.
+# The step fails unless every scenario the in-process half passed also
+# passed against real sshd (the count is derived, not hard-coded) and the
+# real-sshd login test passed: "ran zero tests" or "ran some" cannot pass.
+# Without sshd it prints one line, unless YASSHM_REQUIRE_SSHD=1 (CI), where
+# it fails.
 run_sshd() {
   echo "== sshd =="
   if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
@@ -82,22 +85,24 @@ run_sshd() {
   log=$(mktemp)
   # shellcheck disable=SC2064
   trap "rm -f '$log'" RETURN
-  if ! (cd "$repo_root" && YASSHM_REQUIRE_SSHD=1 CGO_ENABLED=1 mise exec -- go test -race -shuffle=on -count=1 -v -run '^TestRealSSHD' ./...) >"$log" 2>&1; then
+  if ! (cd "$repo_root" && YASSHM_REQUIRE_SSHD=1 CGO_ENABLED=1 mise exec -- go test -race -shuffle=on -count=1 -v -run '^(TestRealSSHD.*|TestContractSSHTest)$' ./...) >"$log" 2>&1; then
     cat "$log"
     echo "sshd: the real-sshd tests failed" >&2
     exit 1
   fi
-  # The evidence QA reads in the CI log: sshd's version, the F10
+  # The evidence QA reads in the CI log: sshd's version, the F10 and A8
   # observations and every real-sshd verdict.
-  grep -E 'realsshd: |F10 observed|^[[:space:]]*--- (PASS|FAIL)' "$log" || true
-  local passed
-  passed=$(grep -cE '^[[:space:]]*--- PASS: TestRealSSHD[^ ]*/' "$log" || true)
-  if [ "${passed:-0}" -lt 1 ]; then
+  grep -E 'realsshd: |F10 observed|A8 observed|^[[:space:]]*--- (PASS|FAIL): TestRealSSHD' "$log" || true
+  local real inproc login
+  real=$(grep -cE '^[[:space:]]*--- PASS: TestRealSSHDContract/' "$log" || true)
+  inproc=$(grep -cE '^[[:space:]]*--- PASS: TestContractSSHTest/' "$log" || true)
+  login=$(grep -cE '^[[:space:]]*--- PASS: TestRealSSHDLogin/' "$log" || true)
+  if [ "${inproc:-0}" -lt 1 ] || [ "${real:-0}" -ne "${inproc:-0}" ] || [ "${login:-0}" -lt 1 ]; then
     cat "$log"
-    echo "sshd: no real-sshd scenario reported PASS" >&2
+    echo "sshd: real-sshd contract scenarios passed: ${real:-0}, in-process: ${inproc:-0}, login test: ${login:-0}; every scenario must pass on both servers" >&2
     exit 1
   fi
-  echo "sshd: $passed real-sshd scenarios passed"
+  echo "sshd: $real of $inproc contract scenarios passed against real sshd, and the login test"
 }
 
 run_cover() {

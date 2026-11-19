@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -94,8 +95,10 @@ type Server struct {
 	User string
 	// Banner is the version line sshd sent, e.g. "SSH-2.0-OpenSSH_9.6p1 ...".
 	Banner string
-	// Dir is the temp directory that holds the config and keys.
-	Dir string
+	// Marker is an environment entry ("YASSHM_REALSSHD=<random>") that sshd
+	// sets (SetEnv) in every session it serves, so every process a session
+	// started, a reparented one included, can be found.
+	Marker string
 
 	cmd    *exec.Cmd
 	stderr *lockedBuffer
@@ -138,16 +141,40 @@ func (s *Server) Signer(t testing.TB) ssh.Signer {
 	return sg
 }
 
-// AuthorizedKey returns the client's public key in authorized_keys form
-// ("type base64").
-func (s *Server) AuthorizedKey(t testing.TB) string {
-	t.Helper()
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.Signer(t).PublicKey())))
+// Leftovers returns the pids of live processes whose environment holds
+// Marker: processes this server's sessions started that still run.
+func (s *Server) Leftovers() []int {
+	return findMarked(s.Marker)
 }
 
-// HostKeyLine returns the host key in authorized_keys form ("type base64").
-func (s *Server) HostKeyLine() string {
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.HostKey)))
+// findMarked scans /proc for processes of this user whose environment
+// holds marker. Zombies are skipped.
+func findMarked(marker string) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	want := []byte(marker + "\x00")
+	var out []int
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		env, err := os.ReadFile("/proc/" + e.Name() + "/environ")
+		if err != nil || !bytes.Contains(append(env, 0), want) {
+			continue
+		}
+		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		if i := bytes.LastIndexByte(stat, ')'); i > 0 && i+2 < len(stat) && stat[i+2] == 'Z' {
+			continue
+		}
+		out = append(out, pid)
+	}
+	return out
 }
 
 // Start starts sshd and registers its cleanup. It fails the test when sshd
@@ -173,14 +200,19 @@ func Start(t testing.TB) *Server {
 	if err := os.WriteFile(authFile, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	var tok [8]byte
+	if _, err := rand.Read(tok[:]); err != nil {
+		t.Fatal(err)
+	}
+	marker := "YASSHM_REALSSHD=" + hex.EncodeToString(tok[:])
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
-		s, err := launch(t, bin, dir, hostKeyFile, authFile, u.Username)
+		s, err := launch(t, bin, dir, hostKeyFile, authFile, u.Username, marker)
 		if err == nil {
 			s.HostKey = hostPub
 			s.ClientKeyFile = clientKeyFile
 			s.User = u.Username
-			s.Dir = dir
+			s.Marker = marker
 			t.Logf("realsshd: %s listening on %s as user %s (version: %s)", bin, s.Addr, s.User, s.Banner)
 			return s
 		}
@@ -192,7 +224,7 @@ func Start(t testing.TB) *Server {
 
 // launch starts one sshd on a fresh port. A port race with another process
 // shows up as an early exit, and Start tries again.
-func launch(t testing.TB, bin, dir, hostKeyFile, authFile, login string) (*Server, error) {
+func launch(t testing.TB, bin, dir, hostKeyFile, authFile, login, marker string) (*Server, error) {
 	t.Helper()
 	port, err := freePort()
 	if err != nil {
@@ -212,6 +244,7 @@ func launch(t testing.TB, bin, dir, hostKeyFile, authFile, login string) (*Serve
 		"KbdInteractiveAuthentication no",
 		"AllowUsers " + login,
 		"Subsystem sftp internal-sftp",
+		"SetEnv " + marker,
 		"LogLevel VERBOSE",
 		"",
 	}, "\n")
@@ -247,6 +280,11 @@ func launch(t testing.TB, bin, dir, hostKeyFile, authFile, login string) (*Serve
 	s.Banner = banner
 	t.Cleanup(func() {
 		s.stop()
+		// Nothing a session started may outlive the test.
+		for _, pid := range findMarked(marker) {
+			t.Logf("realsshd: killing leftover pid %d", pid)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
 		if t.Failed() {
 			t.Logf("--- sshd -e log (%s) ---\n%s", s.Addr, s.Log())
 		}

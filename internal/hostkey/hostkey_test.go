@@ -8,7 +8,6 @@ import (
 	"crypto/rsa"
 	"errors"
 	"io/fs"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,14 +114,14 @@ func TestFixed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := p.Callback()("h:22", &net.TCPAddr{}, pk); err != nil {
+		if err := p.Check(pk); err != nil {
 			t.Fatal(err)
 		}
 		if got := p.Algorithms(); len(got) != 1 || got[0] != ssh.KeyAlgoED25519 {
 			t.Fatalf("Algorithms = %v", got)
 		}
-		if len(p.Keys()) != 1 || !strings.Contains(p.String(), ssh.FingerprintSHA256(pk)) {
-			t.Fatalf("Keys/String = %v %s", p.Keys(), p)
+		if len(p.keys) != 1 || !strings.Contains(p.String(), ssh.FingerprintSHA256(pk)) {
+			t.Fatalf("keys/String = %v %s", p.keys, p)
 		}
 	})
 	t.Run("sad/refuses another key with its fingerprint", func(t *testing.T) {
@@ -230,6 +229,7 @@ func TestKnownHosts(t *testing.T) {
 		{"sad/wrong port", host + " " + line(a) + "\n", 2222, "lists no key for lab-1.example.net:2222", nil, nil},
 		{"sad/only revoked", host + " " + line(a) + "\n@revoked * " + line(a) + "\n", 22, "lists only revoked keys for lab-1.example.net:22", nil, nil},
 		{"raging/cert authority", "@cert-authority *.example.net " + line(a) + "\n" + host + " " + line(b) + "\n", 22, "holds a @cert-authority line; SSH certificates are not supported in this version", nil, nil},
+		{"raging/only a certificate for the host", host + " " + line(certFor(t, a)) + "\n", 22, "lists only certificates for lab-1.example.net:22; SSH certificates are not supported in this version", nil, nil},
 		{"raging/not a known_hosts file", "garbage\n", 22, "does not parse as a known_hosts file", nil, nil},
 		{"edge/empty file", "", 22, "lists no key for lab-1.example.net:22", nil, nil},
 	}

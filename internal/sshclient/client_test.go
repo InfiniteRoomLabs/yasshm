@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +74,17 @@ func TestErrors(t *testing.T) {
 		e := newErr(CodeInternal, "s", "op", "", nil, nil)
 		if e.Error() != "sshclient: op on server s: internal" || e.Detail() != e.Error() || errors.Is(e, ErrNotRunning) {
 			t.Fatal(e.Error())
+		}
+	})
+	t.Run("raging/auth-failure text before the host key was checked is not an auth failure", func(t *testing.T) {
+		// A peer can put any text in a disconnect message during key
+		// exchange; it counts only after our callback accepted its key.
+		text := errors.New("ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey]")
+		if err := handshakeErr(context.Background(), "s", "exec", text, nil, false); !errors.Is(err, CodeUnreachable) {
+			t.Fatalf("unverified peer: %v", err)
+		}
+		if err := handshakeErr(context.Background(), "s", "exec", text, nil, true); !errors.Is(err, CodeAuthFailed) {
+			t.Fatalf("verified peer: %v", err)
 		}
 	})
 	t.Run("happy/CodeOf", func(t *testing.T) {
@@ -167,6 +180,7 @@ func TestConnectRules(t *testing.T) {
 		if len(tg.st.Requests()) != 0 {
 			t.Fatalf("requests sent to an unpinned server: %v", tg.st.Requests())
 		}
+		noHostIn(t, tg.srv, err.Error())
 		waitNoConns(t, tg)
 	})
 	t.Run("sad/the server refuses the key", func(t *testing.T) {
@@ -210,26 +224,98 @@ func TestConnectRules(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	t.Run("sad/a cancel during the dial", func(t *testing.T) {
-		srv := &tenant.Server{Tenant: testTenant, ID: "x", Host: "192.0.2.1", Port: 22, HostKey: mustKeyLine(t), Identity: tenant.Identity{User: "u", PrivateKeyFile: writeKeyFile(t)}}
-		cctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-		_, err := New(Options{ConnectTimeout: 10 * time.Second}).Exec(cctx, testTenant, srv, "true", nil, nil)
-		// 192.0.2.1 (TEST-NET-1) is either unroutable here or times out.
-		if !errors.Is(err, CodeTimeout) && !errors.Is(err, CodeUnreachable) {
+	t.Run("sad/a cancel during the handshake with a server that never speaks", func(t *testing.T) {
+		checkLeaks(t)
+		srv := silentServer(t)
+		c := New(Options{ConnectTimeout: 10 * time.Second})
+		cctx, cancel := context.WithCancel(ctx)
+		time.AfterFunc(100*time.Millisecond, cancel)
+		began := time.Now()
+		_, err := c.Exec(cctx, testTenant, srv, "true", nil, nil)
+		if !errors.Is(err, context.Canceled) || time.Since(began) > 5*time.Second {
+			t.Fatalf("err = %v after %v", err, time.Since(began))
+		}
+		noHostIn(t, srv, err.Error())
+		dctx, dcancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer dcancel()
+		if _, err := c.Exec(dctx, testTenant, srv, "true", nil, nil); !errors.Is(err, CodeTimeout) {
+			t.Fatalf("deadline: err = %v", err)
+		}
+		if _, err := New(Options{ConnectTimeout: 100 * time.Millisecond}).Exec(ctx, testTenant, srv, "true", nil, nil); !errors.Is(err, CodeUnreachable) {
+			t.Fatalf("connect timeout: err = %v", err)
+		}
+	})
+	t.Run("sad/a closed loopback port", func(t *testing.T) {
+		srv := silentServer(t)
+		srv.Port = closedPort(t)
+		_, err := testClient().Exec(ctx, testTenant, srv, "true", nil, nil)
+		if !errors.Is(err, CodeUnreachable) {
 			t.Fatalf("err = %v", err)
 		}
-		if strings.Contains(err.Error(), "192.0.2.1") {
-			t.Fatalf("host in message: %q", err.Error())
-		}
+		noHostIn(t, srv, err.Error())
 	})
 }
 
-func mustKeyLine(t *testing.T) string {
+// silentServer returns a server on a loopback listener that accepts TCP
+// connections and never sends a byte.
+func silentServer(t *testing.T) *tenant.Server {
 	t.Helper()
-	l, _ := otherHostKey(t)
-	return l
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+		wg    sync.WaitGroup
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = l.Close()
+		wg.Wait()
+		mu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		mu.Unlock()
+	})
+	return &tenant.Server{
+		Tenant: testTenant, ID: "silent", Host: "127.0.0.1", Port: l.Addr().(*net.TCPAddr).Port,
+		HostKey: otherHostKey(t), Access: tenant.AccessLook,
+		Identity: tenant.Identity{User: "someone", PrivateKeyFile: writeKeyFile(t)},
+	}
 }
+
+// closedPort returns a loopback port nothing listens on.
+func closedPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if cerr := l.Close(); cerr != nil {
+		t.Fatal(cerr)
+	}
+	return port
+}
+
+// failWriter fails every write.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("writer failed") }
 
 func TestPinningAndKeys(t *testing.T) {
 	ctx := context.Background()
@@ -247,11 +333,12 @@ func TestPinningAndKeys(t *testing.T) {
 		{"sad/a missing known_hosts file", func(s *tenant.Server) { s.HostKey, s.KnownHostsFile = "", filepath.Join(t.TempDir(), "kh") }, CodeInternal, "cannot be read"},
 		{"sad/a known_hosts file without the host", func(s *tenant.Server) {
 			p := filepath.Join(t.TempDir(), "kh")
-			if err := os.WriteFile(p, []byte("other.example.net "+mustKeyLine(t)+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(p, []byte("other.example.net "+otherHostKey(t)+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			s.HostKey, s.KnownHostsFile = "", p
-		}, CodeHostKeyMismatch, "lists no key"},
+		}, CodeHostKeyMismatch, "has no usable key for this server"},
+		{"sad/a private key path that is a directory", func(s *tenant.Server) { s.Identity.PrivateKeyFile = t.TempDir() }, CodeInternal, "is not a regular file"},
 		{"sad/a missing private key", func(s *tenant.Server) { s.Identity.PrivateKeyFile = filepath.Join(t.TempDir(), "nokey") }, CodeInternal, "cannot be read"},
 		{"raging/a private key readable by others", func(s *tenant.Server) {
 			p := writeKeyFile(t)
@@ -276,9 +363,10 @@ func TestPinningAndKeys(t *testing.T) {
 			if CodeOf(err) != cs.code || !strings.Contains(err.Error(), cs.text) {
 				t.Fatalf("err = %v", err)
 			}
-			if strings.Contains(err.Error(), "/") {
-				t.Fatalf("a path in the message: %q", err.Error())
+			if strings.Contains(err.Error(), "/") || strings.Contains(err.Error(), "0644") {
+				t.Fatalf("a path or mode in the message: %q", err.Error())
 			}
+			noHostIn(t, &srv, err.Error())
 		})
 	}
 	t.Run("edge/port zero means 22", func(t *testing.T) {
@@ -316,7 +404,11 @@ func TestCommandFaults(t *testing.T) {
 		if !errors.Is(err, ErrSignalRefused) || CodeOf(err) != CodeInternal {
 			t.Fatalf("err = %v", err)
 		}
-		<-cmd.Done()
+		select {
+		case <-cmd.Done():
+		case <-time.After(10 * time.Second):
+			t.Fatal("a refused signal did not close the session")
+		}
 		st, err := cmd.Wait(ctx)
 		if err != nil || st.Outcome != OutcomeNoStatus || !st.MayStillRun {
 			t.Fatalf("status %+v err %v", st, err)
@@ -329,10 +421,19 @@ func TestCommandFaults(t *testing.T) {
 	t.Run("raging/refused TERM and KILL end with a closed session that may still run", func(t *testing.T) {
 		checkLeaks(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseSignal: true})
-		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 100 * time.Millisecond, KillWait: 100 * time.Millisecond})
+		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 2 * time.Second, KillWait: 2 * time.Second})
+		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		dctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 		defer cancel()
-		st, err := c.Exec(dctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		began := time.Now()
+		st, err := cmd.Wait(dctx)
+		// Refused signals skip their waits: no grace, no kill wait.
+		if el := time.Since(began); el > 1500*time.Millisecond {
+			t.Fatalf("the stop took %v; a refused signal must not wait", el)
+		}
 		if !errors.Is(err, CodeTimeout) || st.Outcome != OutcomeNoStatus || !st.MayStillRun || st.TermSent || st.KillSent || st.Stopped != StopDeadline {
 			t.Fatalf("status %+v err %v", st, err)
 		}
@@ -340,6 +441,82 @@ func TestCommandFaults(t *testing.T) {
 			t.Fatalf("the remote command should still run: %d", tg.st.Running())
 		}
 		waitNoConns(t, tg)
+	})
+	for _, cs := range []struct {
+		name string
+		opts sshtest.Options
+		code Code
+	}{
+		{"raging/a server that never answers signal", sshtest.Options{SilentSignal: true}, CodeTimeout},
+		{"raging/a server that never answers exec", sshtest.Options{SilentExec: true}, CodeTimeout},
+		{"raging/a server that never answers a channel open", sshtest.Options{SilentChannelOpen: true}, CodeTimeout},
+	} {
+		t.Run(cs.name, func(t *testing.T) {
+			checkLeaks(t)
+			tg := newSSHTest(t, cs.opts)
+			c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: 300 * time.Millisecond})
+			o := c.Options()
+			const deadline = time.Second
+			dctx, cancel := context.WithTimeout(ctx, deadline)
+			defer cancel()
+			began := time.Now()
+			st, err := c.Exec(dctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+			if el, limit := time.Since(began), deadline+o.KillGrace+o.KillWait+2*time.Second; el > limit {
+				t.Fatalf("Exec returned after %v, past %v", el, limit)
+			}
+			if !errors.Is(err, cs.code) || !st.MayStillRun || st.Outcome != OutcomeNoStatus || st.Stopped != StopDeadline {
+				t.Fatalf("status %+v err %v", st, err)
+			}
+			noHostIn(t, tg.srv, err.Error())
+			waitNoConns(t, tg)
+		})
+	}
+	t.Run("raging/a caller's Signal to a server that never answers", func(t *testing.T) {
+		checkLeaks(t)
+		tg := newSSHTest(t, sshtest.Options{SilentSignal: true})
+		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: 300 * time.Millisecond})
+		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		began := time.Now()
+		err = cmd.Signal("TERM")
+		if !errors.Is(err, CodeUnreachable) || time.Since(began) > 3*time.Second {
+			t.Fatalf("err = %v after %v", err, time.Since(began))
+		}
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		st, err := cmd.Wait(wctx)
+		if err != nil || !st.MayStillRun {
+			t.Fatalf("status %+v err %v", st, err)
+		}
+		waitNoConns(t, tg)
+	})
+	t.Run("edge/the connect timeout bounds a silent exec without a caller deadline", func(t *testing.T) {
+		checkLeaks(t)
+		tg := newSSHTest(t, sshtest.Options{SilentExec: true})
+		c := New(Options{ConnectTimeout: 300 * time.Millisecond})
+		st, err := c.Exec(ctx, tg.tid, tg.srv, "true", nil, nil)
+		if !errors.Is(err, CodeUnreachable) || !st.MayStillRun || st.Stopped != StopNone {
+			t.Fatalf("status %+v err %v", st, err)
+		}
+	})
+	t.Run("sad/an output writer that fails after an exit 0", func(t *testing.T) {
+		checkLeaks(t)
+		tg := newSSHTest(t, sshtest.Options{})
+		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		st, err := testClient().Exec(wctx, tg.tid, tg.srv, "echo x", failWriter{}, nil)
+		if st.Outcome != OutcomeExited || st.Code != 0 || st.MayStillRun || CodeOf(err) != CodeInternal || !strings.Contains(err.Error(), "output writer") {
+			t.Fatalf("status %+v err %v", st, err)
+		}
+	})
+	t.Run("raging/a signal name from the server that is not a name", func(t *testing.T) {
+		for in, want := range map[string]string{"TERM": "TERM", "SIGKILL": "KILL", "RT+1": "RT+1", "": "UNKNOWN", "term": "UNKNOWN", "A\x1b[2J": "UNKNOWN", strings.Repeat("A", 17): "UNKNOWN"} {
+			if got := cleanSignal(in); got != want {
+				t.Fatalf("%q -> %q, want %q", in, got, want)
+			}
+		}
 	})
 	t.Run("edge/no exit status", func(t *testing.T) {
 		checkLeaks(t)
@@ -513,11 +690,11 @@ func TestSFTPFaults(t *testing.T) {
 			}
 		}
 		for _, m := range []fs.FileMode{0o1777, fs.ModeSetuid | 0o755, fs.ModeDir | 0o755} {
-			if err := c.Upload(ctx, tg.tid, tg.srv, "/x", nil, m, true); !errors.Is(err, ErrInvalidArgument) {
+			if err := c.Upload(ctx, tg.tid, tg.full(), "/x", nil, m, true); !errors.Is(err, ErrInvalidArgument) {
 				t.Fatalf("%v: %v", m, err)
 			}
 		}
-		if err := c.Upload(ctx, tg.tid, tg.srv, "", nil, 0o600, true); !errors.Is(err, ErrInvalidArgument) {
+		if err := c.Upload(ctx, tg.tid, tg.full(), "", nil, 0o600, true); !errors.Is(err, ErrInvalidArgument) {
 			t.Fatal(err)
 		}
 		if tg.st.Accepted() != 0 {
@@ -531,11 +708,11 @@ func TestSFTPFaults(t *testing.T) {
 		if _, _, _, err := c.Download(ctx, tg.tid, tg.srv, "/x", 0, 1); !errors.Is(err, CodeAuthFailed) {
 			t.Fatal(err)
 		}
-		if err := c.Upload(ctx, tg.tid, tg.srv, "/x", nil, 0o600, true); !errors.Is(err, CodeAuthFailed) {
+		if err := c.Upload(ctx, tg.tid, tg.full(), "/x", nil, 0o600, true); !errors.Is(err, CodeAuthFailed) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("sad/the server has no sftp subsystem after a cancel", func(t *testing.T) {
+	t.Run("sad/a context cancelled before the SFTP session", func(t *testing.T) {
 		checkLeaks(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		cctx, cancel := context.WithCancel(ctx)
@@ -543,6 +720,48 @@ func TestSFTPFaults(t *testing.T) {
 		if _, _, _, err := testClient().Download(cctx, tg.tid, tg.srv, "/x", 0, 1); !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
+	})
+	t.Run("sad/the server refuses the sftp subsystem", func(t *testing.T) {
+		checkLeaks(t)
+		tg := newSSHTest(t, sshtest.Options{NoSFTP: true})
+		_, _, _, err := testClient().Download(ctx, tg.tid, tg.srv, "/x", 0, 1)
+		if CodeOf(err) != CodeInternal || !strings.Contains(err.Error(), "SFTP subsystem") {
+			t.Fatalf("err = %v", err)
+		}
+		waitNoConns(t, tg)
+	})
+	t.Run("raging/another tenant with invalid arguments is still another tenant", func(t *testing.T) {
+		tg := newSSHTest(t, sshtest.Options{})
+		c := testClient()
+		if _, _, _, err := c.Download(ctx, "t2", tg.srv, "", -1, -1); !errors.Is(err, ErrWrongTenant) {
+			t.Fatalf("download: %v", err)
+		}
+		if err := c.Upload(ctx, "t2", tg.full(), "", nil, 0o7777, true); !errors.Is(err, ErrWrongTenant) {
+			t.Fatalf("upload: %v", err)
+		}
+	})
+	t.Run("corner/a context that ends mid-transfer", func(t *testing.T) {
+		checkLeaks(t)
+		tg := newSSHTest(t, sshtest.Options{})
+		c := testClient()
+		big := make([]byte, 64<<20)
+		p := filepath.Join(tg.dir, "big")
+		if err := os.WriteFile(p, big, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Connect first, then let the deadline fall inside the transfer:
+		// the connect alone takes a few milliseconds.
+		dctx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+		defer cancel()
+		if _, _, _, err := c.Download(dctx, tg.tid, tg.srv, p, 0, int64(len(big))); !errors.Is(err, CodeTimeout) {
+			t.Fatalf("download: err = %v", err)
+		}
+		uctx, ucancel := context.WithTimeout(ctx, 150*time.Millisecond)
+		defer ucancel()
+		if err := c.Upload(uctx, tg.tid, tg.full(), filepath.Join(tg.dir, "up"), big, 0o600, true); !errors.Is(err, CodeTimeout) {
+			t.Fatalf("upload: err = %v", err)
+		}
+		waitNoConns(t, tg)
 	})
 	t.Run("corner/overwrite without posix-rename writes in place", func(t *testing.T) {
 		checkLeaks(t)
@@ -564,7 +783,7 @@ func TestSFTPFaults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if uerr := c.Upload(ctx, tg.tid, tg.srv, p, []byte("new"), 0o640, true); uerr != nil {
+		if uerr := c.Upload(ctx, tg.tid, tg.full(), p, []byte("new"), 0o640, true); uerr != nil {
 			t.Fatal(uerr)
 		}
 		checkFile(t, p, "new", 0o640)
@@ -575,7 +794,7 @@ func TestSFTPFaults(t *testing.T) {
 		if !os.SameFile(fi, fi2) {
 			t.Fatal("the file was replaced, not written in place")
 		}
-		if err := c.Upload(ctx, tg.tid, tg.srv, filepath.Join(tg.dir, "nodir", "x"), []byte("x"), 0o600, true); err == nil {
+		if err := c.Upload(ctx, tg.tid, tg.full(), filepath.Join(tg.dir, "nodir", "x"), []byte("x"), 0o600, true); err == nil {
 			t.Fatal("wrote into a missing directory")
 		}
 	})
@@ -586,7 +805,7 @@ func TestSFTPFaults(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(d, "child"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := testClient().Upload(ctx, tg.tid, tg.srv, d, []byte("x"), 0o600, true); err == nil {
+		if err := testClient().Upload(ctx, tg.tid, tg.full(), d, []byte("x"), 0o600, true); err == nil {
 			t.Fatal("renamed over a non-empty directory")
 		}
 		entries, err := os.ReadDir(tg.dir)
@@ -604,7 +823,7 @@ func TestSFTPFaults(t *testing.T) {
 		if err := os.WriteFile(p, []byte("keep"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := testClient().Upload(ctx, tg.tid, tg.srv, p, []byte("x"), 0o600, false); !errors.Is(err, fs.ErrExist) {
+		if err := testClient().Upload(ctx, tg.tid, tg.full(), p, []byte("x"), 0o600, false); !errors.Is(err, fs.ErrExist) {
 			t.Fatal(err)
 		}
 		checkFile(t, p, "keep", 0o600)

@@ -3,8 +3,10 @@ package sshclient
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
-	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -71,8 +73,12 @@ func (w *gateWriter) Write(p []byte) (int, error) {
 func exec1(t *testing.T, tg target, c *Client, command string) (st ExitStatus, stdout, stderr string) {
 	t.Helper()
 	var out, errb bytes.Buffer
+	// Bounded, so a client that leaves stdin open fails here instead of
+	// hanging until the test binary's timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	var err error
-	st, err = c.Exec(context.Background(), tg.tid, tg.srv, command, &out, &errb)
+	st, err = c.Exec(ctx, tg.tid, tg.srv, command, &out, &errb)
 	if err != nil {
 		t.Fatalf("Exec(%q): %v", command, err)
 	}
@@ -80,8 +86,8 @@ func exec1(t *testing.T, tg target, c *Client, command string) (st ExitStatus, s
 }
 
 // startWithPid starts command, which must print one pid as its first line,
-// and returns the handle, the pid and a cancel for the Wait context.
-func startWithPid(t *testing.T, tg target, c *Client, command string) (*Command, int, *notifyBuffer) {
+// and returns the handle and the pid; the pid is killed in a cleanup.
+func startWithPid(t *testing.T, tg target, c *Client, command string) (cmd *Command, pid int) {
 	t.Helper()
 	out := newNotifyBuffer()
 	cmd, err := c.Start(context.Background(), tg.tid, tg.srv, command, out, nil)
@@ -89,7 +95,7 @@ func startWithPid(t *testing.T, tg target, c *Client, command string) (*Command,
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Close() })
-	pid, err := strconv.Atoi(strings.TrimSpace(out.waitLine(t, 10*time.Second)))
+	pid, err = strconv.Atoi(strings.TrimSpace(out.waitLine(t, 10*time.Second)))
 	if err != nil || pid <= 1 {
 		t.Fatalf("no pid in %q", out.String())
 	}
@@ -98,7 +104,7 @@ func startWithPid(t *testing.T, tg target, c *Client, command string) (*Command,
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
-	return cmd, pid, out
+	return cmd, pid
 }
 
 var scenarios = []scenario{
@@ -177,9 +183,15 @@ var scenarios = []scenario{
 		}
 	}},
 	{"happy/a deadline sends TERM and the error is timeout", func(t *testing.T, tg target, c *Client) {
+		// Connect outside the deadline, so a slow connect under -race cannot
+		// eat the budget.
+		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, "sleep 300", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
-		st, err := c.Exec(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		st, err := cmd.Wait(ctx)
 		if !errors.Is(err, CodeTimeout) || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err = %v", err)
 		}
@@ -209,7 +221,7 @@ var scenarios = []scenario{
 		}
 	}},
 	{"happy/TERM reaches a forked child in the process group", func(t *testing.T, tg target, c *Client) {
-		cmd, pid, _ := startWithPid(t, tg, c, "sleep 300 & echo $!; wait")
+		cmd, pid := startWithPid(t, tg, c, "sleep 300 & echo $!; wait")
 		if !alive(pid) {
 			t.Fatalf("child %d is not running", pid)
 		}
@@ -225,10 +237,13 @@ var scenarios = []scenario{
 	}},
 	{"corner/a child that left the process group survives TERM and KILL", func(t *testing.T, tg target, c *Client) {
 		if _, err := exec.LookPath("setsid"); err != nil {
+			if realsshd.Required() {
+				t.Fatalf("no setsid binary, so the F10 survivor case cannot be observed")
+			}
 			t.Logf("no setsid binary here; the survivor case was not observed")
 			return
 		}
-		cmd, pid, _ := startWithPid(t, tg, c, "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!; sleep 300")
+		cmd, pid := startWithPid(t, tg, c, "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!; sleep 300")
 		// $! is printed before the child has called setsid(); stop only
 		// once it leads its own process group.
 		if !poll(5*time.Second, func() bool { return pgid(pid) == pid }) {
@@ -253,7 +268,7 @@ var scenarios = []scenario{
 		}
 	}},
 	{"happy/the signal request is accepted and delivered", func(t *testing.T, tg target, c *Client) {
-		cmd, pid, _ := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+		cmd, pid := startWithPid(t, tg, c, "echo $$; exec sleep 300")
 		if err := cmd.Signal("TERM"); err != nil {
 			t.Fatalf("Signal(TERM) = %v", err)
 		}
@@ -266,7 +281,7 @@ var scenarios = []scenario{
 			t.Fatalf("pid %d still alive", pid)
 		}
 		for _, name := range []string{"INT", "HUP", "QUIT", "USR1", "USR2", "KILL"} {
-			cmd2, _, _ := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+			cmd2, _ := startWithPid(t, tg, c, "echo $$; exec sleep 300")
 			if err := cmd2.Signal(name); err != nil {
 				t.Fatalf("Signal(%s) = %v", name, err)
 			}
@@ -278,7 +293,7 @@ var scenarios = []scenario{
 		t.Logf("F10 observed (%s): INT HUP QUIT USR1 USR2 KILL accepted and delivered", tg.banner)
 	}},
 	{"corner/closing the session does not stop the command", func(t *testing.T, tg target, c *Client) {
-		cmd, pid, _ := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+		cmd, pid := startWithPid(t, tg, c, "echo $$; exec sleep 300")
 		if err := cmd.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -295,6 +310,19 @@ var scenarios = []scenario{
 		}
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 			t.Fatal(err)
+		}
+	}},
+	{"corner/a background child that holds stdout keeps the session open", func(t *testing.T, tg target, c *Client) {
+		// The shell exits at once; its child keeps stdout open, so the
+		// server reports the exit but does not close the channel. Pinned
+		// on both servers for the job engine (spec 5.5 callout).
+		cmd, pid := startWithPid(t, tg, c, "sleep 30 & echo $!")
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		st, err := cmd.Wait(ctx)
+		t.Logf("A8 observed (%s): outcome %s code %d, TERM accepted %v, KILL accepted %v, may still run %v, child alive %v, err %v", tg.banner, st.Outcome, st.Code, st.TermSent, st.KillSent, st.MayStillRun, alive(pid), CodeOf(err))
+		if !errors.Is(err, CodeTimeout) || st.Outcome != OutcomeExited || st.Code != 0 || st.TermSent || st.KillSent || !st.MayStillRun || st.Stopped != StopDeadline {
+			t.Fatalf("status %+v err %v", st, err)
 		}
 	}},
 	{"sad/a signal after the command ended is not running", func(t *testing.T, tg target, c *Client) {
@@ -363,23 +391,74 @@ var scenarios = []scenario{
 			t.Fatalf("directory: err = %v", err)
 		}
 	}},
+	{"raging/download of a FIFO or a device is refused before it is opened", func(t *testing.T, tg target, c *Client) {
+		fifo := filepath.Join(tg.dir, "fifo")
+		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Bounded: opening a FIFO blocks until a writer appears.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, p := range []string{fifo, "/dev/null"} {
+			began := time.Now()
+			_, _, _, err := c.Download(ctx, tg.tid, tg.srv, p, 0, 10)
+			if !errors.Is(err, ErrNotRegular) || time.Since(began) > 5*time.Second {
+				t.Fatalf("%s: err = %v after %v", p, err, time.Since(began))
+			}
+		}
+		// Nothing has the FIFO open: a non-blocking open for writing fails
+		// with ENXIO when there is no reader.
+		if fd, err := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = syscall.Close(fd)
+			t.Fatal("something still has the FIFO open for reading")
+		}
+	}},
+	{"edge/download through a symbolic link to a regular file", func(t *testing.T, tg target, c *Client) {
+		p := filepath.Join(tg.dir, "real.txt")
+		if err := os.WriteFile(p, []byte("linked"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		l := filepath.Join(tg.dir, "link.txt")
+		if err := os.Symlink(p, l); err != nil {
+			t.Fatal(err)
+		}
+		data, size, eof, err := c.Download(context.Background(), tg.tid, tg.srv, l, 0, 100)
+		if err != nil || string(data) != "linked" || size != 6 || !eof {
+			t.Fatalf("data %q size %d eof %v err %v", data, size, eof, err)
+		}
+	}},
+	{"edge/download of a file that reports size zero reads to EOF", func(t *testing.T, tg target, c *Client) {
+		want, err := os.ReadFile("/proc/version")
+		if err != nil || len(want) == 0 {
+			t.Fatalf("/proc/version: %v", err)
+		}
+		data, size, eof, err := c.Download(context.Background(), tg.tid, tg.srv, "/proc/version", 0, 1<<16)
+		if err != nil || !bytes.Equal(data, want) || !eof || size != int64(len(want)) {
+			t.Fatalf("len %d size %d eof %v err %v", len(data), size, eof, err)
+		}
+		data, size, eof, err = c.Download(context.Background(), tg.tid, tg.srv, "/proc/version", 2, 3)
+		if err != nil || !bytes.Equal(data, want[2:5]) || eof || size != 5 {
+			t.Fatalf("partial: data %q size %d eof %v err %v", data, size, eof, err)
+		}
+	}},
 	{"happy/upload creates with the mode and refuses to overwrite", func(t *testing.T, tg target, c *Client) {
+		srv := tg.full()
 		p := filepath.Join(tg.dir, "up.txt")
-		if err := c.Upload(context.Background(), tg.tid, tg.srv, p, []byte("first"), 0o640, false); err != nil {
+		if err := c.Upload(context.Background(), tg.tid, srv, p, []byte("first"), 0o640, false); err != nil {
 			t.Fatal(err)
 		}
 		checkFile(t, p, "first", 0o640)
-		err := c.Upload(context.Background(), tg.tid, tg.srv, p, []byte("second"), 0o600, false)
+		err := c.Upload(context.Background(), tg.tid, srv, p, []byte("second"), 0o600, false)
 		if !errors.Is(err, fs.ErrExist) {
 			t.Fatalf("overwrite=false on an existing file: err = %v", err)
 		}
 		checkFile(t, p, "first", 0o640)
-		if err = c.Upload(context.Background(), tg.tid, tg.srv, p, []byte("second"), 0o600, true); err != nil {
+		if err = c.Upload(context.Background(), tg.tid, srv, p, []byte("second"), 0o600, true); err != nil {
 			t.Fatal(err)
 		}
 		checkFile(t, p, "second", 0o600)
 		empty := filepath.Join(tg.dir, "empty")
-		if err = c.Upload(context.Background(), tg.tid, tg.srv, empty, nil, 0o644, true); err != nil {
+		if err = c.Upload(context.Background(), tg.tid, srv, empty, nil, 0o644, true); err != nil {
 			t.Fatal(err)
 		}
 		checkFile(t, empty, "", 0o644)
@@ -394,27 +473,78 @@ var scenarios = []scenario{
 		}
 	}},
 	{"sad/upload into a missing directory", func(t *testing.T, tg target, c *Client) {
-		err := c.Upload(context.Background(), tg.tid, tg.srv, filepath.Join(tg.dir, "no", "such"), []byte("x"), 0o600, false)
+		srv := tg.full()
+		err := c.Upload(context.Background(), tg.tid, srv, filepath.Join(tg.dir, "no", "such"), []byte("x"), 0o600, false)
 		if err == nil || CodeOf(err) != CodeInternal {
 			t.Fatalf("err = %v", err)
 		}
 	}},
+	{"edge/upload onto a symbolic link replaces the link, never its target", func(t *testing.T, tg target, c *Client) {
+		srv := tg.full()
+		target := filepath.Join(tg.dir, "target.txt")
+		if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		l := filepath.Join(tg.dir, "link.txt")
+		if err := os.Symlink(target, l); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Upload(context.Background(), tg.tid, srv, l, []byte("new"), 0o600, false); !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("overwrite=false: err = %v", err)
+		}
+		if err := c.Upload(context.Background(), tg.tid, srv, l, []byte("new"), 0o600, true); err != nil {
+			t.Fatal(err)
+		}
+		checkFile(t, target, "target", 0o600)
+		fi, err := os.Lstat(l)
+		if err != nil || !fi.Mode().IsRegular() {
+			t.Fatalf("the link was not replaced by a file: %v %v", fi, err)
+		}
+		checkFile(t, l, "new", 0o600)
+	}},
+	{"sad/upload to a server that grants look is refused before connecting", func(t *testing.T, tg target, c *Client) {
+		p := filepath.Join(tg.dir, "denied")
+		if err := c.Upload(context.Background(), tg.tid, tg.srv, p, []byte("x"), 0o600, false); !errors.Is(err, ErrAccessLevel) {
+			t.Fatalf("err = %v", err)
+		}
+		if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("the file exists: %v", err)
+		}
+	}},
 	{"sad/host key mismatch", func(t *testing.T, tg target, c *Client) {
 		srv := *tg.srv
-		srv.HostKey, _ = otherHostKey(t)
+		srv.HostKey = otherHostKey(t)
 		_, err := c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
 		var e *Error
 		if !errors.Is(err, CodeHostKeyMismatch) || !errors.As(err, &e) || e.Fingerprint() != ssh.FingerprintSHA256(tg.hostKey) {
 			t.Fatalf("err = %v", err)
 		}
-		if !strings.Contains(err.Error(), e.Fingerprint()) || strings.Contains(err.Error(), tg.srv.Host) {
+		if !strings.Contains(err.Error(), e.Fingerprint()) {
 			t.Fatalf("message %q", err.Error())
 		}
+		noHostIn(t, &srv, err.Error())
+	}},
+	{"sad/a host key of another type is a mismatch", func(t *testing.T, tg target, c *Client) {
+		ek, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pk, err := ssh.NewPublicKey(&ek.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := *tg.srv
+		srv.HostKey = keyLine(pk)
+		_, err = c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
+		if !errors.Is(err, CodeHostKeyMismatch) {
+			t.Fatalf("err = %v", err)
+		}
+		noHostIn(t, &srv, err.Error())
 	}},
 	{"happy/known_hosts pinning", func(t *testing.T, tg target, c *Client) {
 		kh := filepath.Join(t.TempDir(), "known_hosts")
 		hostPat := "[" + tg.srv.Host + "]:" + strconv.Itoa(tg.srv.Port)
-		other, _ := otherHostKey(t)
+		other := otherHostKey(t)
 		text := hostPat + " " + other + "\n" + hostPat + " " + keyLine(tg.hostKey) + "\n"
 		if err := os.WriteFile(kh, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
@@ -427,9 +557,11 @@ var scenarios = []scenario{
 		if err := os.WriteFile(kh, []byte(text+"@revoked * "+keyLine(tg.hostKey)+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil); !errors.Is(err, CodeHostKeyMismatch) {
+		_, err := c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
+		if !errors.Is(err, CodeHostKeyMismatch) {
 			t.Fatalf("revoked key: err = %v", err)
 		}
+		noHostIn(t, &srv, err.Error())
 	}},
 	{"sad/refused key", func(t *testing.T, tg target, c *Client) {
 		srv := *tg.srv
@@ -438,6 +570,7 @@ var scenarios = []scenario{
 		if !errors.Is(err, CodeAuthFailed) {
 			t.Fatalf("err = %v", err)
 		}
+		noHostIn(t, &srv, err.Error())
 	}},
 	{"sad/unreachable port", func(t *testing.T, tg target, c *Client) {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -451,9 +584,10 @@ var scenarios = []scenario{
 		srv := *tg.srv
 		srv.Port = port
 		_, err = c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
-		if !errors.Is(err, CodeUnreachable) || strings.Contains(err.Error(), "127.0.0.1") {
+		if !errors.Is(err, CodeUnreachable) {
 			t.Fatalf("err = %v", err)
 		}
+		noHostIn(t, &srv, err.Error())
 	}},
 	{"happy/probe", func(t *testing.T, tg target, c *Client) {
 		f, err := c.Probe(context.Background(), tg.tid, tg.srv)
@@ -486,6 +620,9 @@ func runContract(t *testing.T, mk func(t *testing.T) target) {
 		t.Run(sc.name, func(t *testing.T) {
 			checkLeaks(t)
 			tg := mk(t)
+			// Registered after the server, so it runs before the server's
+			// own cleanup (which kills survivors) and after the scenario's.
+			checkNoLeftovers(t, &tg)
 			sc.run(t, tg, testClient())
 			waitNoConns(t, tg)
 		})
@@ -505,5 +642,3 @@ func TestRealSSHDContract(t *testing.T) {
 	}
 	runContract(t, newReal)
 }
-
-var _ io.Writer = (*countWriter)(nil)

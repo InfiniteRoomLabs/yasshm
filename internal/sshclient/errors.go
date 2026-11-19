@@ -45,15 +45,19 @@ var (
 	ErrNotRunning = errors.New("the command is not running")
 	// ErrNotRegular: the remote path is not a regular file.
 	ErrNotRegular = errors.New("is not a regular file")
+	// ErrAccessLevel: the server does not grant the access level the
+	// operation needs (Upload needs full).
+	ErrAccessLevel = errors.New("the server does not grant the access level this operation needs")
 	// ErrInvalidArgument: an argument is out of range (a negative offset, a
 	// mode with bits outside 0777, an empty path).
 	ErrInvalidArgument = errors.New("invalid argument")
 )
 
-// Error is every error this package returns. Its message names the
-// operation and the server id, never the host name, a key, a path on the
-// gateway or the command text, so it may reach a tool result. The cause,
-// which may name the host, is reachable only through Unwrap and Detail, for
+// Error is every error this package returns. Its message is fixed text
+// that names the operation and the server id: never the host name or port,
+// the login user, a uid or file mode, a key or key path, a gateway path or
+// the command text, so it may reach a tool result. The cause, which may name
+// the host and paths, is reachable only through Unwrap and Detail, for
 // operator logs.
 type Error struct {
 	code        Code
@@ -63,6 +67,9 @@ type Error struct {
 	fingerprint string
 	kind        error
 	cause       error
+	// mayRun: the exec request may have reached the server (Start gave up
+	// on a server that stopped answering); Exec reports MayStillRun.
+	mayRun bool
 }
 
 // Error renders "sshclient: <op> on server <id>: <code>[: <message>]".

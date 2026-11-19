@@ -58,6 +58,15 @@ type Options struct {
 	// NoExitStatus closes an exec channel after the command ends without
 	// sending exit-status or exit-signal.
 	NoExitStatus bool
+	// SilentSignal never answers a signal request (and delivers nothing).
+	SilentSignal bool
+	// SilentExec never answers an exec request (and runs nothing).
+	SilentExec bool
+	// SilentChannelOpen accepts authentication, then never answers a
+	// channel open.
+	SilentChannelOpen bool
+	// NoSFTP refuses the sftp subsystem.
+	NoSFTP bool
 }
 
 // Server is a running test server.
@@ -87,6 +96,7 @@ type Server struct {
 
 	mu        sync.Mutex
 	conns     map[net.Conn]struct{}
+	pipes     map[*os.File]struct{}
 	procs     map[int]*exec.Cmd
 	pids      []int
 	requests  []string
@@ -140,6 +150,7 @@ func Start(t testing.TB, opts Options) *Server {
 		opts:  opts,
 		done:  make(chan struct{}),
 		conns: map[net.Conn]struct{}{},
+		pipes: map[*os.File]struct{}{},
 		procs: map[int]*exec.Cmd{},
 	}
 	pinned, pinnedSigner := genKey(t)
@@ -236,6 +247,10 @@ func (s *Server) Close() {
 		for pid := range s.procs {
 			_ = syscall.Kill(-pid, syscall.SIGKILL)
 		}
+		// A child that left the group may still hold an output pipe.
+		for f := range s.pipes {
+			_ = f.Close()
+		}
 		s.mu.Unlock()
 		s.wg.Wait()
 	})
@@ -297,6 +312,10 @@ func (s *Server) handle(c net.Conn) {
 		}
 	}()
 	for nc := range chans {
+		if s.opts.SilentChannelOpen {
+			s.record("channel-open-ignored:" + nc.ChannelType())
+			continue
+		}
 		if nc.ChannelType() != "session" {
 			s.record("channel:" + nc.ChannelType())
 			_ = nc.Reject(ssh.Prohibited, "sshtest: only session channels")
@@ -324,6 +343,9 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 		switch req.Type {
 		case "exec":
 			s.record("exec")
+			if s.opts.SilentExec {
+				continue
+			}
 			var p struct{ Command string }
 			mu.Lock()
 			ok := !started && ssh.Unmarshal(req.Payload, &p) == nil
@@ -347,7 +369,7 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 			_ = ssh.Unmarshal(req.Payload, &p)
 			s.record("subsystem:" + p.Name)
 			mu.Lock()
-			ok := !started && p.Name == "sftp"
+			ok := !started && p.Name == "sftp" && !s.opts.NoSFTP
 			started = started || ok
 			mu.Unlock()
 			_ = req.Reply(ok, nil)
@@ -359,6 +381,9 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 			var p struct{ Signal string }
 			_ = ssh.Unmarshal(req.Payload, &p)
 			s.record("signal:" + p.Signal)
+			if s.opts.SilentSignal {
+				continue
+			}
 			sig, known := signals[p.Signal]
 			mu.Lock()
 			ok := known && !s.opts.RefuseSignal && pid > 0 && !ended
@@ -391,67 +416,111 @@ func (d *dropWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// run starts command with sh -c in Root, in its own process group, and a
-// goroutine that reaps it and reports its exit on ch.
+// run starts command with sh -c in Root, in its own process group. Like
+// OpenSSH, it reports the exit as soon as the shell is reaped, and closes
+// the channel only once both output pipes reach EOF: a background child
+// that still holds stdout keeps the channel open.
 func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (int, error) {
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		return 0, err
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		closeAll(inR, inW)
+		return 0, err
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		closeAll(inR, inW, outR, outW)
+		return 0, err
+	}
 	cmd := exec.Command("sh", "-c", command) //nolint:gosec // G204: the test server's job is to run the command it was sent
 	cmd.Dir = s.Root
-	cmd.Stdin = ch
-	var stdout io.Writer = ch
-	if s.opts.DropMidStream {
-		stdout = &dropWriter{w: ch, conn: c}
-	}
-	cmd.Stdout = stdout
-	cmd.Stderr = ch.Stderr()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, errW
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 2 * time.Second
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	select {
 	case <-s.done:
+		closeAll(inR, inW, outR, outW, errR, errW)
 		return 0, errors.New("sshtest: closed")
 	default:
 	}
 	if err := cmd.Start(); err != nil {
+		closeAll(inR, inW, outR, outW, errR, errW)
 		return 0, err
 	}
+	closeAll(inR, outW, errW)
 	pid := cmd.Process.Pid
 	s.procs[pid] = cmd
 	s.pids = append(s.pids, pid)
-	s.wg.Add(1)
+	s.pipes[inW], s.pipes[outR], s.pipes[errR] = struct{}{}, struct{}{}, struct{}{}
+	var stdout io.Writer = ch
+	if s.opts.DropMidStream {
+		stdout = &dropWriter{w: ch, conn: c}
+	}
+	var copies sync.WaitGroup
+	copies.Add(2)
+	s.wg.Add(4)
+	go s.pump(nil, inW, ch)
+	go s.pump(&copies, stdout, outR)
+	go s.pump(&copies, ch.Stderr(), errR)
 	go func() {
 		defer s.wg.Done()
-		err := cmd.Wait()
+		_ = cmd.Wait()
 		s.mu.Lock()
 		delete(s.procs, pid)
 		s.mu.Unlock()
 		ended()
-		s.reportExit(ch, cmd, err)
+		s.reportExit(ch, cmd)
+		copies.Wait()
+		_ = ch.CloseWrite()
+		_ = ch.Close()
 	}()
 	return pid, nil
 }
 
-// reportExit sends exit-status or exit-signal (unless NoExitStatus) and
-// closes the channel.
-func (s *Server) reportExit(ch ssh.Channel, cmd *exec.Cmd, err error) {
-	defer func() { _ = ch.Close() }()
-	_ = ch.CloseWrite()
+// pump copies src to dst until EOF or an error, then closes the pipe end
+// it owns (the *os.File of the two).
+func (s *Server) pump(done *sync.WaitGroup, dst io.Writer, src io.Reader) {
+	defer s.wg.Done()
+	if done != nil {
+		defer done.Done()
+	}
+	_, _ = io.Copy(dst, src)
+	for _, x := range []any{dst, src} {
+		if f, ok := x.(*os.File); ok {
+			_ = f.Close()
+			s.mu.Lock()
+			delete(s.pipes, f)
+			s.mu.Unlock()
+		}
+	}
+}
+
+func closeAll(fs ...*os.File) {
+	for _, f := range fs {
+		_ = f.Close()
+	}
+}
+
+// reportExit sends exit-status or exit-signal, unless NoExitStatus.
+func (s *Server) reportExit(ch ssh.Channel, cmd *exec.Cmd) {
 	if s.opts.NoExitStatus || cmd.ProcessState == nil {
 		return
 	}
 	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
-	switch {
-	case ok && ws.Signaled():
+	if ok && ws.Signaled() {
 		_, _ = ch.SendRequest("exit-signal", false, ssh.Marshal(struct {
 			Signal     string
 			CoreDumped bool
 			Error      string
 			Lang       string
 		}{Signal: signalName(ws.Signal())}))
-	default:
-		_ = err                                                                                                                // the exit code is in ProcessState either way
-		_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(cmd.ProcessState.ExitCode())})) //nolint:gosec // G115: an exit code is 0..255 here
+		return
 	}
+	_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(cmd.ProcessState.ExitCode())})) //nolint:gosec // G115: an exit code is 0..255 here
 }
 
 // serveSFTP serves the SFTP subsystem on ch until the client ends it.

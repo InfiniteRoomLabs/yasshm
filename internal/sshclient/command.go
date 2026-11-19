@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -90,6 +91,11 @@ type ExitStatus struct {
 
 // Command is a running remote command and its connection. Wait, Signal and
 // Close are safe to call concurrently and more than once.
+//
+// A handle is bound to the tenant that started it (Tenant()) and its
+// methods take no tenant: whoever holds the handle can wait for, signal or
+// close it. The job engine must keep handles keyed by cmd.Tenant() and the
+// command id, and look one up only with the caller's tenant (spec 5.2).
 type Command struct {
 	tenant tenant.TenantID
 	server tenant.ServerID
@@ -116,17 +122,49 @@ type Command struct {
 // Start connects to srv, starts command exactly as given (the remote login
 // shell interprets it) and returns its handle. Both outputs are streamed to
 // stdout and stderr as they arrive (nil discards); a slow writer holds back
-// the SSH window, so at most one window per stream is buffered. ctx bounds
-// the connect only; Wait's context bounds the run. The caller must call
-// Wait or Close.
+// the SSH window, so at most one window per stream is buffered. ctx and the
+// connect timeout bound everything up to the server's answer to the exec
+// request (a server that never answers is ssh_unreachable, or timeout when
+// ctx ended); Wait's context bounds the run. The caller must call Wait or
+// Close.
+//
+// A writer must not fail and must not block forever. A writer that returns
+// an error stops being fed: the rest of that stream is not drained, the SSH
+// window fills and the remote command stalls until it is stopped; if the
+// command still exits 0, Wait reports it exited with code 0 and an internal
+// error saying an output writer failed. A writer that blocks forever keeps
+// Wait and Close blocked, even after the connection is closed.
 func (c *Client) Start(ctx context.Context, tid tenant.TenantID, srv *tenant.Server, command string, stdout, stderr io.Writer) (*Command, error) {
 	const op = "exec"
 	client, err := c.dial(ctx, tid, srv, tenant.AccessLook, op)
 	if err != nil {
 		return nil, err
 	}
+	// Until the exec reply arrives nothing else bounds the channel open or
+	// the exec request: keep ctx plus the connect timeout armed to close the
+	// connection.
+	wctx, cancel := context.WithTimeout(ctx, c.opts.ConnectTimeout)
+	defer cancel()
+	stop := context.AfterFunc(wctx, func() { _ = client.Close() })
+	silent := func(cause error) error {
+		_ = client.Close()
+		var e *Error
+		switch {
+		case ctx.Err() != nil:
+			e = ctxErr(srv.ID, op, ctx.Err())
+		case pastDeadline(ctx):
+			e = ctxErr(srv.ID, op, context.DeadlineExceeded)
+		default:
+			e = newErr(CodeUnreachable, srv.ID, op, "the server did not answer in time", nil, cause)
+		}
+		e.mayRun = true
+		return e
+	}
 	sess, err := client.NewSession()
 	if err != nil {
+		if !stop() {
+			return nil, silent(err)
+		}
 		_ = client.Close()
 		return nil, newErr(CodeUnreachable, srv.ID, op, "the server did not open a session", nil, err)
 	}
@@ -139,7 +177,12 @@ func (c *Client) Start(ctx context.Context, tid tenant.TenantID, srv *tenant.Ser
 	sess.Stdout = stdout
 	sess.Stderr = stderr
 	// Stdin stays nil: x/crypto then sends EOF at once.
-	if err := sess.Start(command); err != nil {
+	err = sess.Start(command)
+	if !stop() {
+		// The timer fired: whatever Start returned, the connection is closed.
+		return nil, silent(nil)
+	}
+	if err != nil {
 		_ = sess.Close()
 		_ = client.Close()
 		// x/crypto's error repeats the command text; it is not kept.
@@ -161,10 +204,23 @@ func (c *Client) Start(ctx context.Context, tid tenant.TenantID, srv *tenant.Ser
 }
 
 // Exec runs command on srv and waits for it (Start, then Wait with the same
-// context). A non-zero exit is not an error; see Wait for the rest.
+// context). A non-zero exit is not an error; see Wait for the rest. When
+// Start gave up on a server that stopped answering, the status is
+// no_status with MayStillRun set: the exec request may have arrived.
 func (c *Client) Exec(ctx context.Context, tid tenant.TenantID, srv *tenant.Server, command string, stdout, stderr io.Writer) (ExitStatus, error) {
 	cmd, err := c.Start(ctx, tid, srv, command, stdout, stderr)
 	if err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.mayRun {
+			st := ExitStatus{Outcome: OutcomeNoStatus, MayStillRun: true}
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				st.Stopped = StopDeadline
+			case errors.Is(err, context.Canceled):
+				st.Stopped = StopCancel
+			}
+			return st, err
+		}
 		return ExitStatus{}, err
 	}
 	return cmd.Wait(ctx)
@@ -198,7 +254,8 @@ func (cmd *Command) Wait(ctx context.Context) (ExitStatus, error) {
 	return cmd.finish()
 }
 
-// stop runs the TERM -> grace -> KILL -> wait -> close sequence once.
+// stop runs the TERM -> grace -> KILL -> wait -> close sequence once. Every
+// step is bounded: an unanswered signal request closes the connection.
 func (cmd *Command) stop(cause error) {
 	cmd.stopOnce.Do(func() {
 		cmd.mu.Lock()
@@ -207,24 +264,35 @@ func (cmd *Command) stop(cause error) {
 		if cmd.hasExited() {
 			return
 		}
-		if ok, _ := cmd.sendSignal("TERM"); ok {
+		// A refused or unanswered signal skips its wait: nothing was sent.
+		if ok, _, _ := cmd.sendSignal("TERM", cmd.opts.KillGrace); ok {
 			cmd.mu.Lock()
 			cmd.termSent = true
 			cmd.mu.Unlock()
+			if cmd.waitExit(cmd.opts.KillGrace) {
+				return
+			}
 		}
-		if cmd.waitExit(cmd.opts.KillGrace) {
+		if cmd.isClosed() {
 			return
 		}
-		if ok, _ := cmd.sendSignal("KILL"); ok {
+		if ok, _, _ := cmd.sendSignal("KILL", cmd.opts.KillWait); ok {
 			cmd.mu.Lock()
 			cmd.killSent = true
 			cmd.mu.Unlock()
-		}
-		if cmd.waitExit(cmd.opts.KillWait) {
-			return
+			if cmd.waitExit(cmd.opts.KillWait) {
+				return
+			}
 		}
 		cmd.closeConn(true)
 	})
+}
+
+// isClosed reports whether the connection has been closed by this side.
+func (cmd *Command) isClosed() bool {
+	cmd.mu.Lock()
+	defer cmd.mu.Unlock()
+	return cmd.closed
 }
 
 // hasExited reports whether the session has ended.
@@ -266,16 +334,27 @@ func (cmd *Command) closeConn(mayStillRun bool) {
 
 // sendSignal sends the signal request with want-reply set and reports
 // whether the server accepted it. x/crypto's Session.Signal sends it
-// without asking for a reply, so it cannot report acceptance (F10).
-func (cmd *Command) sendSignal(name string) (bool, error) {
-	return cmd.sess.SendRequest("signal", true, ssh.Marshal(struct{ Signal string }{name}))
+// without asking for a reply, so it cannot report acceptance (F10). A
+// server that does not answer within bound gets its connection closed
+// (silent is then true): x/crypto waits for the reply without a timeout.
+func (cmd *Command) sendSignal(name string, bound time.Duration) (ok, silent bool, err error) {
+	var fired atomic.Bool
+	t := time.AfterFunc(bound, func() {
+		fired.Store(true)
+		cmd.closeConn(true)
+	})
+	ok, err = cmd.sess.SendRequest("signal", true, ssh.Marshal(struct{ Signal string }{name}))
+	t.Stop()
+	return ok && !fired.Load(), fired.Load(), err
 }
 
 // Signal sends signal name (TERM, KILL, INT, HUP, QUIT, USR1 or USR2) to
 // the command's process group and returns nil when the server accepted it.
 // When the server refuses, the session is closed (the command may still be
 // running; Wait then reports MayStillRun) and the error matches
-// ErrSignalRefused. A command that already ended gives ErrNotRunning.
+// ErrSignalRefused. A server that does not answer within KillWait gets its
+// connection closed and the error is CodeUnreachable (the command may still
+// be running). A command that already ended gives ErrNotRunning.
 func (cmd *Command) Signal(name string) error {
 	const op = "signal"
 	if !ValidSignal(name) {
@@ -287,8 +366,10 @@ func (cmd *Command) Signal(name string) error {
 	if closed || cmd.hasExited() {
 		return newErr(CodeInternal, cmd.server, op, ErrNotRunning.Error(), ErrNotRunning, nil)
 	}
-	ok, err := cmd.sendSignal(name)
+	ok, silent, err := cmd.sendSignal(name, cmd.opts.KillWait)
 	switch {
+	case silent:
+		return newErr(CodeUnreachable, cmd.server, op, "the server did not answer the signal request", nil, err)
 	case err != nil && cmd.hasExited():
 		return newErr(CodeInternal, cmd.server, op, ErrNotRunning.Error(), ErrNotRunning, err)
 	case err != nil:
@@ -323,13 +404,13 @@ func (cmd *Command) finish() (ExitStatus, error) {
 			ee *ssh.ExitError
 			em *ssh.ExitMissingError
 		)
-		lost := false
+		lost, writerFailed := false, false
 		switch err := cmd.waitErr; {
 		case err == nil:
 			st.Outcome = OutcomeExited
 		case errors.As(err, &ee):
 			if sig := ee.Signal(); sig != "" {
-				st.Outcome, st.Signal = OutcomeSignaled, trimSig(sig)
+				st.Outcome, st.Signal = OutcomeSignaled, cleanSignal(sig)
 			} else {
 				st.Outcome, st.Code = OutcomeExited, ee.ExitStatus()
 			}
@@ -337,8 +418,10 @@ func (cmd *Command) finish() (ExitStatus, error) {
 			st.Outcome = OutcomeNoStatus
 			lost = !closedByUs && !cmd.alive()
 		default:
-			st.Outcome = OutcomeNoStatus
-			lost = !closedByUs
+			// x/crypto returns another error only for exit status 0 with a
+			// failed output copy (session.go, Wait): a writer failed.
+			st.Outcome = OutcomeExited
+			writerFailed = true
 		}
 		if st.Outcome == OutcomeNoStatus {
 			st.MayStillRun = true
@@ -355,6 +438,8 @@ func (cmd *Command) finish() (ExitStatus, error) {
 			cmd.err = ctxErr(cmd.server, "exec", cause)
 		case lost:
 			cmd.err = newErr(CodeUnreachable, cmd.server, "exec", "the connection was lost", nil, cmd.waitErr)
+		case writerFailed:
+			cmd.err = newErr(CodeInternal, cmd.server, "exec", "an output writer failed", nil, cmd.waitErr)
 		}
 		cmd.closeConn(false)
 	})
