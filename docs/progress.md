@@ -17,8 +17,8 @@ Living status doc. Read first, update at every phase boundary. Last updated: 202
 
 Filled in by the session at kickoff. Record this repo's working branch name here. For the infra repo write only "see the infra clone" (its branch name stays out of this public repo).
 
-- This repo: not started
-- Infra repo: not started
+- This repo: `claude/serene-franklin-jv4pu7` (started there; it was created at the head of the plan branch)
+- Infra repo: see the infra clone
 
 ## Phase ledger
 
@@ -26,7 +26,7 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 
 | Phase | Status | Phase base .. ship commit | Notes |
 |---|---|---|---|
-| 0 Scaffold | not started | -- | Next |
+| 0 Scaffold | in progress | base: the commit `docs(phase-0): start scaffold` | Premise results are in the Discoveries below |
 | 1 Config, tenants, policy, audit | not started | -- | |
 | 2 SSH layer | not started | -- | |
 | 3 Jobs, store, outputs | not started | -- | |
@@ -44,9 +44,13 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 - 2026-11-18 (planning): the edge may cut a request whose origin is silent for about 100 seconds, so the default ceiling for a synchronous wait is 60 seconds, not the client's 300 (spec F15, still INFERRED).
 - 2026-11-19 (planning): the build was reworked from one run per phase on shared branches to one session that runs the whole roadmap on one working branch per clone, with no phase branches and no merges. Reasons: a session can count on pushing only its own working branch (spec F13), and an idle session's disk is not kept (spec F20). A session can start each clone on a chosen branch (spec F19), so it starts on the plan branch.
 
+- 2026-11-19 (build, Phase 0 premise): the gate is green on the clean tree the session started from (8 seconds), CI is green on the pushed working branch, and pushing the working branch works. The `agency` plugin is loaded (its skills and agents are listed). Whether its changelog and version guard hooks fire in this session was not observed, so their rules are applied by hand: `CHANGELOG.md` is staged with every ship commit, and `git add` and `git commit` are separate tool calls.
+- 2026-11-19 (build, Phase 0 premise): the module proxy and the vulnerability database are reachable. There is no Docker daemon. There is no `sshd`, and the session's permission layer refused to install `openssh-server`; the lead did not work around it, so the real-`sshd` lane is CI-only (spec section 7 callout, F12). Adding `openssh-server` to the cloud environment's setup script would give a later session the lane locally.
+- 2026-11-19 (build, Phase 0 premise): `scripts/redaction-check.sh` finds the plugin's resolver but the resolver has no term list in this session, so the check prints "no redaction terms configured" and passes. Hygiene is therefore held by rule and by the security lane, not by that script: nothing from the infra clone is quoted here, and fixtures are synthetic.
+
 ## Next action
 
-Send the kickoff prompt in `GOAL.md` (section *Kickoff*) to a new cloud session that has this repo and the infra repo attached, on the fable model.
+The build session is running. The current target is in `GOAL.md` under `## Goal`; the ledger above says how far it got.
 
 ## How to resume in a fresh or compacted session
 
