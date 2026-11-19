@@ -1,23 +1,14 @@
 package config
 
 import (
-	"crypto/ed25519"
 	"errors"
-	"io"
 	"io/fs"
-	"net"
-	"os"
-	"strconv"
-	"strings"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 
+	"github.com/InfiniteRoomLabs/yasshm/internal/hostkey"
 	"github.com/InfiniteRoomLabs/yasshm/internal/keyfile"
 )
-
-// maxKnownHostsBytes bounds a known_hosts file.
-const maxKnownHostsBytes = 1 << 20
 
 // checkFiles runs the checks that need the file system.
 func checkFiles(refs fileRefs) []Problem {
@@ -73,74 +64,16 @@ func checkPrivateKey(file string) string {
 	return ""
 }
 
-// probeKey is a fixed public key that no known_hosts file lists; it is used
-// to ask a known_hosts callback which keys it holds for a host.
-var probeKey = func() ssh.PublicKey {
-	pk, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public())
-	if err != nil {
-		panic(err)
-	}
-	return pk
-}()
-
-// readKnownHosts reads a regular file through a size limit.
-func readKnownHosts(file string) (data []byte, problem string) {
-	f, err := os.Open(file) //nolint:gosec // G304: the operator's config names the known_hosts file
-	if err != nil {
-		return nil, fileProblem(err)
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fileProblem(err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fileProblem(keyfile.ErrNotRegular)
-	}
-	b, err := io.ReadAll(io.LimitReader(f, maxKnownHostsBytes+1))
-	if err != nil {
-		return nil, fileProblem(err)
-	}
-	if len(b) > maxKnownHostsBytes {
-		return nil, "is larger than 1 MiB"
-	}
-	return b, ""
-}
-
 // checkKnownHosts checks that file is a known_hosts file that pins at least
-// one key for host:port that is not revoked. A @cert-authority line is
-// refused (SSH certificates are not supported in v0.1, D18). Host patterns
-// follow OpenSSH: hashed entries and wildcard patterns such as
-// *.example.net are accepted, and a wildcard pins its key for every host it
-// matches. Any outcome of the check other than "this key is pinned" fails
-// closed.
+// one key for host:port that is not revoked, by the rules in
+// internal/hostkey that the SSH layer enforces again at connect.
 func checkKnownHosts(file, host string, port int) string {
-	data, msg := readKnownHosts(file)
-	if msg != "" {
-		return msg
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if f := strings.Fields(line); len(f) > 0 && f[0] == "@cert-authority" {
-			return "holds a @cert-authority line; SSH certificates are not supported in this version"
+	if _, err := hostkey.KnownHosts(file, host, port); err != nil {
+		var he *hostkey.Error
+		if errors.As(err, &he) {
+			return he.Msg
 		}
+		return fileProblem(err)
 	}
-	cb, err := knownhosts.New(file)
-	if err != nil {
-		return "does not parse as a known_hosts file"
-	}
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	remote := &net.TCPAddr{IP: net.IPv4zero}
-	var ke *knownhosts.KeyError
-	if err := cb(addr, remote, probeKey); !errors.As(err, &ke) {
-		return "cannot be checked for " + addr
-	}
-	if len(ke.Want) == 0 {
-		return "lists no key for " + addr
-	}
-	for _, k := range ke.Want {
-		if cb(addr, remote, k.Key) == nil {
-			return ""
-		}
-	}
-	return "lists only revoked keys for " + addr
+	return ""
 }

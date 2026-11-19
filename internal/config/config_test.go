@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh/knownhosts"
 
+	"github.com/InfiniteRoomLabs/yasshm/internal/hostkey"
 	"github.com/InfiniteRoomLabs/yasshm/internal/keyfile"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 )
@@ -706,7 +707,7 @@ func TestLoad(t *testing.T) {
 		}
 		t.Run("raging/known_hosts file larger than 1 MiB", func(t *testing.T) {
 			kh := filepath.Join(t.TempDir(), "known_hosts")
-			writeFile(t, kh, []byte(strings.Repeat("#", maxKnownHostsBytes+1)), 0o644)
+			writeFile(t, kh, []byte(strings.Repeat("#", hostkey.MaxKnownHostsBytes+1)), 0o644)
 			text := edit(t, k.base(), "host_key: \""+k.hostKey+"\"", "known_hosts_file: "+kh)
 			_, err := Load(writeConfig(t, t.TempDir(), text))
 			wantProblem(t, err, "known_hosts_file: is larger than 1 MiB")

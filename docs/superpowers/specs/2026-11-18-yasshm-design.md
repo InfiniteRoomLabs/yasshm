@@ -83,7 +83,7 @@ The model is `docs/architecture/*.c4`; this table is its index. A phase that bui
 | `edge` | system, external | -- | -- |
 | `targets` | system, external | -- | -- |
 | `yasshm` | system | module `github.com/InfiniteRoomLabs/yasshm` | -- |
-| `yasshm.config` | component | `internal/config`, `internal/keyfile` (safe private key reads, also used by `internal/sshclient`) | Phase 1 |
+| `yasshm.config` | component | `internal/config`, `internal/keyfile` (safe private key reads, also used by `internal/sshclient`), `internal/hostkey` (the host key pinning rules, also enforced by `internal/sshclient` at connect; moved out of `internal/config` in Phase 2) | Phase 1 |
 | `yasshm.policy` | component | `internal/policy` (domain types in `internal/tenant`) | Phase 1 |
 | `yasshm.audit` | datastore | `internal/audit` | Phase 1 |
 | `yasshm.ssh` | component | `internal/sshclient` | Phase 2 |
@@ -96,7 +96,7 @@ The model is `docs/architecture/*.c4`; this table is its index. A phase that bui
 
 Relationships (all in `model.c4`): `assistant -> edge`, `edge -> yasshm.http`, `yasshm.http -> yasshm.auth`, `yasshm.http -> yasshm.tools`, `yasshm.tools -> yasshm.policy`, `yasshm.tools -> yasshm.jobs`, `yasshm.tools -> yasshm.audit`, `yasshm.jobs -> yasshm.ssh`, `yasshm.jobs -> yasshm.store`, `yasshm.jobs -> yasshm.outputs`, `yasshm.auth -> yasshm.config`, `yasshm.policy -> yasshm.config`, `yasshm.ssh -> yasshm.config`, `yasshm.auth -> edge` (signing keys), `yasshm.ssh -> targets`, `operator -> yasshm.config`, `operator -> yasshm.audit`.
 
-Dependency rule: packages depend downward only. `tenant` (types) depends on nothing. `keyfile` (reading a private key file safely) depends on nothing. `config`, `policy`, `audit`, `sshclient`, `store` depend on `tenant`; `config` and `sshclient` also depend on `keyfile`. `jobs` depends on `sshclient`, `store`, `audit`. `auth` depends on `config`, `tenant`. `mcpserver` depends on all of them. Test support lives in `internal/testkit/...` and is imported only by tests.
+Dependency rule: packages depend downward only. `tenant` (types) depends on nothing. `keyfile` (reading a private key file safely) depends on nothing. `hostkey` (the host key pinning rules: a pinned key, or the non-revoked plain keys a `known_hosts` file lists for `host:port`) depends on nothing. `config`, `policy`, `audit`, `sshclient`, `store` depend on `tenant`; `config` and `sshclient` also depend on `keyfile` and `hostkey`. `jobs` depends on `sshclient`, `store`, `audit`. `auth` depends on `config`, `tenant`. `mcpserver` depends on all of them. Test support lives in `internal/testkit/...` and is imported only by tests.
 
 ## 5. Component design
 

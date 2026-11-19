@@ -13,6 +13,8 @@ import (
 	"unicode"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/InfiniteRoomLabs/yasshm/internal/hostkey"
 )
 
 var labelPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
@@ -119,24 +121,13 @@ func checkCertsURL(s string) string {
 	return "must be https (http is allowed only for a loopback IP address)"
 }
 
-// parseHostKey parses a pinned host key in authorized_keys form and returns
-// it normalised to "type base64" (the comment dropped).
+// parseHostKey parses a pinned host key in authorized_keys form (the rules
+// are internal/hostkey's) and returns it normalised to "type base64" (the
+// comment dropped).
 func parseHostKey(k string) (norm, msg string) {
-	if strings.ContainsAny(k, "\r\n") {
-		return "", "must be one line"
-	}
-	pk, _, opts, rest, err := ssh.ParseAuthorizedKey([]byte(k))
+	pk, err := hostkey.ParseKey(k)
 	if err != nil {
-		return "", "does not parse as an OpenSSH public key (\"type base64 [comment]\")"
-	}
-	if len(opts) > 0 {
-		return "", "must not carry authorized_keys options"
-	}
-	if strings.TrimSpace(string(rest)) != "" {
-		return "", "must hold exactly one key"
-	}
-	if _, isCert := pk.(*ssh.Certificate); isCert {
-		return "", "SSH certificates are not supported in this version"
+		return "", err.Error()
 	}
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk))), ""
 }

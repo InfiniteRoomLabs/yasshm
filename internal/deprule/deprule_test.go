@@ -19,7 +19,8 @@ const module = "github.com/InfiniteRoomLabs/yasshm"
 var allowed = map[string][]string{
 	"tenant":  {},
 	"keyfile": {},
-	"config":  {"internal/tenant", "internal/keyfile"},
+	"hostkey": {},
+	"config":  {"internal/tenant", "internal/keyfile", "internal/hostkey"},
 	"policy":  {"internal/tenant"},
 	"audit":   {"internal/tenant"},
 }
