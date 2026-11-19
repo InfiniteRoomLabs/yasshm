@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The gate step `sshd` between `test` and `cover`: runs the real-`sshd` tests where `sshd` exists and fails unless one passed; CI sets `YASSHM_REQUIRE_SSHD=1` so a missing `sshd` fails
 - Dependency: `github.com/pkg/sftp` v1.13.12 (with `github.com/kr/fs` v0.1.0)
 - `sshtest` switches for a server that never answers `signal`, `exec` or a channel open, and one that refuses SFTP; `realsshd` tags every session with an environment marker so the suite asserts no process is left behind on either server
+- `internal/store` (Phase 3): command records in SQLite through the pure-Go driver `modernc.org/sqlite` v1.62.0 (spec F18): WAL mode, one writer, busy timeout, `synchronous=FULL`, a forward-only migration list versioned by `PRAGMA user_version`, a database newer than the binary refused before any write, `(tenant, id)` primary key with every index and every statement scoped by tenant, a state machine in which only `running` changes and `lost` is reached only by `RecoverAllTenants`, the database 0600 inside a 0700 data directory owned by the gateway's user
 
 ### Changed
 

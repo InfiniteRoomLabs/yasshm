@@ -68,9 +68,8 @@ model {
     }
 
     store = datastore 'Job store' {
-      #planned
-      technology 'SQLite'
-      description 'Command records, tenant-scoped'
+      technology 'SQLite in WAL mode, pure-Go driver modernc.org/sqlite'
+      description 'Command records keyed by (tenant, id), one writer, forward-only migrations (internal/store)'
     }
 
     outputs = datastore 'Output store' {
