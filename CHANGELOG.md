@@ -29,6 +29,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `internal/keyfile`: reads a private key file once and checks the open file (regular, no group or other bits, owned by the effective uid, at most 64 KiB); the config loader uses it and the SSH layer will
 - Path globs (built-in and `deny_paths`) take `**` as the whole first element (any depth) or last element (a subtree); new built-in path rule `proc-links` and wider credential, key and shadow-backup entries
 - `internal/deprule` also checks that `internal/testkit` is imported only from `_test.go` files
+- `internal/sshclient` (Phase 2): `Client.Start` returns a `Command` handle with `Wait`, `Signal` and `Close`; `Exec`, `Download`, `Upload` and `Probe`; one connection per call, every call scoped by `TenantID`; host keys pinned (never a certificate, never trust on first use), the private key read through `internal/keyfile` at each connect, no PTY, environment, agent or forwarding, stdin closed; a context end sends `TERM`, waits the kill grace, sends `KILL`, and only then closes, and `ExitStatus.MayStillRun` says when no exit arrived; `Signal` sends the request with want-reply and reports a refusal; errors carry one of `ssh_unreachable`, `ssh_auth_failed`, `host_key_mismatch`, `timeout`, `internal` and the server id, never the host
+- `internal/hostkey`: the host key pinning rules, shared by the config loader and the SSH layer
+- `internal/testkit/sshtest`: an in-process SSH server that runs commands with `sh -c` in their own process group, honours `signal`, serves SFTP, records every request and has fault switches (wrong host key, refused key, dropped connection, refused signal, slow banner, no exit status)
+- `internal/testkit/realsshd`: starts a real OpenSSH `sshd` as the current user on a loopback port with a `restrict` key; the SSH contract suite runs against both servers, and the real-`sshd` half observed F10 in CI (the `signal` request is accepted and reaches the process group)
+- The gate step `sshd` between `test` and `cover`: runs the real-`sshd` tests where `sshd` exists and fails unless one passed; CI sets `YASSHM_REQUIRE_SSHD=1` so a missing `sshd` fails
+- Dependency: `github.com/pkg/sftp` v1.13.12 (with `github.com/kr/fs` v0.1.0)
 
 ### Changed
 
@@ -37,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Phase 1 review gate: the audit log ends a partial last line on open, refuses a non-regular path before opening and a log owned by another uid, stores `&`, `<`, `>` literally, refuses an unnamed event, and takes a closed set of stop reasons
 - Command rails skip a quoted span only when it opens and closes on one line, and every line start is a command start, so a quote in a comment or here-doc cannot hide a later line
 - `mise run fuzz` passes `-fuzzminimizetime 1s` so the 30 seconds go to fuzzing, not minimizing
+- The `known_hosts` and pinned-key rules moved from `internal/config` into `internal/hostkey`, with the same messages; a `known_hosts` file is now opened with `O_NONBLOCK`, so a FIFO cannot block the loader
 
 - `GOAL.md` targets Phase 2; `docs/progress.md` records Phases 0 and 1 as shipped
 - A dirty working tree now fails the gate (`scripts/check.sh` exits 1) instead of printing a banner

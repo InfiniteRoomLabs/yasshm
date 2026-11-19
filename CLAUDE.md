@@ -80,7 +80,7 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 
 ```bash
 scripts/bootstrap.sh                  # mise + pinned toolchain on a bare machine; no-op when current
-mise run check                        # the gate: fmt lint skipcheck test cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
+mise run check                        # the gate: fmt lint skipcheck test sshd cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
 mise run build                        # dist/yasshm_<version>_linux_{amd64,arm64} + dist/SHA256SUMS
 mise run test                         # go test -race with coverage.out (the gate's test step uses it)
 mise run lint                         # golangci-lint
@@ -103,7 +103,12 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - `mise run check` fails (exit 1) on a dirty tree, after `all` and after a single step: commit or stash before gating, so green describes HEAD. The gate itself never dirties the tree (`coverage.out` and `dist/` are gitignored).
 - `-race` needs CGO, so the `test` task sets `CGO_ENABLED=1` for the test binary only; `build` is always `CGO_ENABLED=0`.
 - `cover` reads `coverage.out` and fails when it is missing: run `mise run check -- test` first. The floor is `COVER_FLOOR` at the top of `scripts/check.sh`.
-- The sandbox has no `sshd`: `scripts/bootstrap.sh` and the gate print one line saying the real-sshd lane runs in CI only; CI installs `openssh-server` and fails if it is absent.
+- The sandbox has no `sshd`: `scripts/bootstrap.sh` and the gate's `sshd` step print one line saying the real-sshd lane runs in CI only; CI installs `openssh-server`, sets `YASSHM_REQUIRE_SSHD=1` and fails if it is absent. Develop the real-sshd half blind and read the CI job log over REST (`gh api repos/InfiniteRoomLabs/yasshm/actions/jobs/<id>/logs`); the `sshd` step prints `sshd -e` output of a failing test and the `F10 observed` lines.
+- A real-sshd test is named `TestRealSSHD*` and starts with `if !realsshd.Present(t) { return }` -- never `t.Skip` (`skipcheck` forbids it). The `sshd` step selects tests by that name and counts their PASS lines.
+- `govet` runs `shadow` and `gocritic` runs `sloppyReassign`: an inner `if err := ...` that shadows an outer `err` fails lint, and so does `if err = ...`; name the inner one (`werr`, `cerr`).
+- A shell's `$!` is printed before the background child has run `setsid`; a test that needs the child out of the group polls its pgid in `/proc/<pid>/stat` first.
+- SFTP version 3 has no "file exists" status: OpenSSH answers a failed `O_EXCL` create with a generic failure, so `sshclient.Upload` checks with `lstat` before reporting `fs.ErrExist`. `pkg/sftp`'s server renames over an existing file on a plain rename; only `O_EXCL` gives no-clobber on both servers.
+- The CI runner's `sshd` (OpenSSH 10.2p1 on 2026-11-19) runs as the runner's user with `UsePAM no`, `StrictModes no`, `PidFile none` and an absolute-path config in a temp dir, and must be started by its absolute path (it re-executes itself).
 - In a cloud session the redaction check has no term list and passes as a no-op, so hygiene is held by rule and by the security lane.
 - `cover` merges duplicate profile blocks by key because `-coverpkg=./...` writes one copy per test binary.
 - govulncheck is pinned in `mise.toml [tools]` through the `go:` backend (`"go:golang.org/x/vuln/cmd/govulncheck"`); bump it to a released version, never `@latest`.
