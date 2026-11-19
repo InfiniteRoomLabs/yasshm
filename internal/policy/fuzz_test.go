@@ -22,8 +22,16 @@ func FuzzCommandGuardRail(f *testing.F) {
 	f.Add("ls\x00", uint8(0))
 	f.Add("\xff", uint8(3))
 	f.Add("", uint8(4))
+	f.Add("echo x # it's", uint8(0))
+	f.Add("cat <<'EOF'\nit's", uint8(0))
+	f.Add("echo $'a\\'b", uint8(0))
 	f.Fuzz(func(t *testing.T, cmd string, pad uint8) {
 		r := &tenantRules{maxCommandBytes: 1 << 16}
+		// A newline always starts a command, whatever the line before it
+		// holds (an open quote, a comment, a here-doc line).
+		if nl := r.checkCommand(cmd + "\nsudo id"); nl.Allow {
+			t.Fatalf("%q followed by a line with sudo is allowed", cmd)
+		}
 		d := r.checkCommand(cmd)
 		if d.Allow && (strings.IndexByte(cmd, 0) >= 0 || !utf8.ValidString(cmd)) {
 			t.Fatalf("allowed %q", cmd)

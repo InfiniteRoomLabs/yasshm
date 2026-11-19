@@ -22,22 +22,38 @@ type commandRule struct {
 // These are regular expressions, not a shell parser; the package doc lists
 // what they accept.
 const (
-	// outsideQuotes: text before a command start, with single- and
-	// double-quoted strings and backslash escapes taken whole, so a
-	// separator inside quotes does not count.
-	outsideQuotes = `(?:[^'"\\]|\\(?s:.)|'[^']*'|"(?:[^"\\]|\\(?s:.))*")*?`
+	// lineStart: where a scan for a command start may begin: the start of
+	// the command, or any line start, since a newline always starts a new
+	// command. After a newline, the first quote on the line may close a
+	// quote opened on an earlier line, so it is taken as a plain character.
+	// That fails closed: in a multi-line script a quoted separator on a
+	// later line can be over-denied, and a line inside a multi-line quoted
+	// string that begins with a denied word is denied. That is the accepted
+	// cost of never letting a quote hide a line.
+	lineStart = `(?:^|[\n\r](?:[^'"\n\r]*['"])?)`
+	// outsideQuotes: text before a command start on the same line, with
+	// quoted strings and backslash escapes taken whole, so a separator
+	// inside quotes does not count. A quoted span is skipped only when it
+	// opens and closes on the same line; an unterminated quote is never
+	// skipped, so it can hide at most the rest of its own line, which the
+	// shell treats as quoted data or as a comment. ANSI-C strings ($'a\'b')
+	// are taken whole with their escapes. A single-quoted span may also be
+	// read with backslash escapes ('a\'b'), as fish reads it: the login
+	// shell on the target is not known, and either reading may reveal a
+	// separator, so both are tried (failing closed).
+	outsideQuotes = `(?:[^'"\\\n\r]|\\[^\n\r]|\$?'(?:[^'\\\n\r]|\\[^\n\r])*'|'[^'\n\r]*'|"(?:[^"\\\n\r]|\\[^\n\r])*")*?`
 	// separator: what ends one command and starts the next, outside quotes:
 	// ; & | ( ) { } ! a backtick, a newline, $( and find's -exec/-execdir.
 	separator = `(?:[;&|(){}!\x60\n\r]|\$\(|(?:^|\s)-exec(?:dir)?\s)`
-	// dqSubstitution: a $( or backtick inside double quotes, which still
-	// runs a command.
-	dqSubstitution = `"(?:[^"\\]|\\(?s:.))*?(?:\$\(|\x60)`
+	// dqSubstitution: a $( or backtick inside double quotes on the same
+	// line, which still runs a command.
+	dqSubstitution = `"(?:[^"\\\n\r]|\\[^\n\r])*?(?:\$\(|\x60)`
 	// shellC: the script of `sh -c` (optionally quoted), at its start or
 	// after a separator inside it.
 	shellC = `\b(?:sh|bash|zsh|dash|ksh|mksh|ash|fish|csh|tcsh)\s+(?:-\w+\s+)*-\w*c\w*\s+['"]?(?:[^'"]*?(?:[;&|(){}!\n\r\x60]|\$\())?`
 	// cmdStart: the start of the command, a separator, a substitution in
 	// double quotes, or the script of `sh -c`; then white space.
-	cmdStart = `(?:^(?:` + outsideQuotes + `(?:` + separator + `|` + dqSubstitution + `))?|` + shellC + `)\s*`
+	cmdStart = `(?:` + lineStart + `(?:` + outsideQuotes + `(?:` + separator + `|` + dqSubstitution + `))?|` + shellC + `)\s*`
 	// wrappers: zero or more words that run the next word as a command
 	// (with options, or numeric arguments such as `nice -n 5` and
 	// `timeout 5s`), shell keywords that precede a command, and VAR=value
@@ -111,7 +127,7 @@ var builtinCommands = compileCommands([]commandRule{
 	{Name: "dd-to-device", Pattern: cmdArgs(`dd`, `[^;&|\n]*\bof=`+q+blockDev)},
 	// A redirect or tee onto a block device, outside quotes. `> /dev/null`
 	// and `echo '> /dev/sda'` are allowed.
-	{Name: "write-to-device", Pattern: `^` + outsideQuotes + `>\|?\s*` + q + blockDev + `|` + cmdArgs(`tee`, `[^;&|\n]*\s`+q+blockDev)},
+	{Name: "write-to-device", Pattern: lineStart + outsideQuotes + `>\|?\s*` + q + blockDev + `|` + cmdArgs(`tee`, `[^;&|\n]*\s`+q+blockDev)},
 	// A recursive rm whose arguments include / or /* (quoted or not, the
 	// option before or after it). `rm -rf /tmp/x` and `rm -r ./build/` are
 	// allowed.

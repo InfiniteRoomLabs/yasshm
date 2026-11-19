@@ -16,11 +16,19 @@ var commandCases = map[string]struct{ match, noMatch []string }{
 			"FOO=bar sudo id", "xargs sudo rm < list", "sudo",
 			"eval sudo id", `\sudo id`, `"sudo" id`, `'sudo' id`, "find . -exec sudo id \\;", "find . -execdir sudo id {} +",
 			`sh -c 'ls; sudo id'`, `echo "$(sudo id)"`, "echo \"`sudo id`\"", "command sudo id", "command -p sudo id",
-			"grep -E 'a|b' log; sudo id", `echo "it's"; sudo id`, `echo \'; sudo id`},
+			"grep -E 'a|b' log; sudo id", `echo "it's"; sudo id`, `echo \'; sudo id`,
+			// A quote in a comment, a here-doc body or an ANSI-C string never
+			// hides a later line or separator.
+			"echo x # '\nsudo id", "echo x # \"\nsudo id", "echo x # it's\nsudo id\necho 'done'", "echo x #' ; true\nsudo id #'",
+			"cat <<'EOF'\nit's\nEOF\nsudo id", "echo $'a\\'b' ; sudo id", "echo 'a\nb' ; sudo id",
+			"echo 'a' ; sudo id", `echo "x" && sudo id`, `echo \' ; sudo id`, `echo "a\"" ; sudo id`, `echo 'it'\''s' ; sudo id`,
+			`echo \\ ; sudo id`, "echo 'a'\nsudo id", "bash -c \"ls; sudo id\"",
+			// fish reads \' inside single quotes as an escaped quote.
+			`echo 'a\'b' ; sudo id`},
 		noMatch: []string{"pseudocode", "echo sudo", "grep sudo /var/log/auth.log", "cat /etc/sudoers", "visudo -c", "sudoedit /etc/x",
 			"which sudo", "man sudo", "ls /usr/bin/sudo", "grep -c sudo /var/log/auth.log", "echo 'sudo id'", "id -nG sudo",
 			"command -v sudo", "command -V sudo", "ps aux | grep -E 'sshd|sudo'", `grep "a;sudo" log`, "echo 'x; sudo id'",
-			"find . -name sudo", "echo '$(sudo id)'"},
+			"find . -name sudo", "echo '$(sudo id)'", "grep -E 'sshd|sudo' /var/log/auth.log", `echo "sudo is a command"`, "ps aux | grep sudo"},
 	},
 	"su": {
 		match:   []string{"su", "su -", "su root -c id", "ls; su -", "/bin/su -", "exec su", `\su -`, "eval su"},
@@ -91,7 +99,7 @@ var commandCases = map[string]struct{ match, noMatch []string }{
 	},
 	"fork-bomb": {
 		match:   []string{":(){ :|:& };:", ":() { : | : & }; :", "bomb() { bomb | bomb & }; bomb"},
-		noMatch: []string{"f() { echo hi; }; f", "f() { ls | wc -l; }; f", "echo ':|:&'", "a | b &", "f() { dmesg | tail && echo ok; }; f"},
+		noMatch: []string{"f() { echo hi; }; f", "f() { ls | wc -l; }; f", "echo ':|:&'", "a | b &", "f() { dmesg | tail && echo ok; }; f", "f() { dmesg | tail && echo ok; }"},
 	},
 }
 

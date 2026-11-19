@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Phase 1 review gate: null or empty principals and a tenant without a valid principal are errors; ASCII-only emails with ASCII case folding; `known_hosts_file` refuses `@cert-authority` lines and needs one key that is not revoked; `deny_commands`/`deny_paths` capped at 256 entries; `max_upload_bytes` maximum lowered to 1048576
 - Phase 1 review gate: policy fails closed on zero and undefined values (`Permits` outside `none..full`, a tool requiring `none`, a principal without tenant or kind, an empty tenant id); command rails skip quoted text, cover `eval`, `-exec`, `|&`, quoted or escaped command words and targets, more shells, and stop denying `command -v`, `| python3 -m ...` and `&&` inside functions
 - Phase 1 review gate: the audit log ends a partial last line on open, refuses a non-regular path before opening and a log owned by another uid, stores `&`, `<`, `>` literally, refuses an unnamed event, and takes a closed set of stop reasons
+- Command rails skip a quoted span only when it opens and closes on one line, and every line start is a command start, so a quote in a comment or here-doc cannot hide a later line
 - `mise run fuzz` passes `-fuzzminimizetime 1s` so the 30 seconds go to fuzzing, not minimizing
 
 - `GOAL.md` targets Phase 1; `docs/progress.md` records Phase 0 as shipped

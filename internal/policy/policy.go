@@ -25,7 +25,14 @@
 // bomb written as `function f { f|f& }`, and on the path side custom key
 // names, `.envrc` and `/proc/*/cmdline`. Single- and double-quoted text is
 // skipped when looking for a command start, except for a $( or backtick
-// inside double quotes.
+// inside double quotes, but only when the quote opens and closes on one
+// line: every line start is a command start, so a quote in a comment, a
+// here-doc body or an unterminated string never hides a later line. The
+// accepted cost, failing closed: a line inside a multi-line quoted string
+// that begins with a denied word is denied, and so can be a quoted
+// separator on a later line of a multi-line script. A single-quoted span
+// is read both without escapes (sh, bash) and with them (fish), since the
+// target's login shell is not known.
 //
 // Fail closed: a principal without a tenant or a kind is not_found, a tool
 // that declares no level (AccessNone) or an undefined one is access_denied,
