@@ -85,9 +85,11 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("log = %q", b)
 		}
 	})
-	t.Run("edge/an existing 0400 log is accepted", func(t *testing.T) {
+	// 0200 rather than 0400: a 0400 file is writable only for root, and CI
+	// does not run as root.
+	t.Run("edge/an existing owner-only 0200 log is accepted", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "audit.jsonl")
-		writeMode(t, p, "", 0o400)
+		writeMode(t, p, "", 0o200)
 		l, err := Open(p)
 		if err != nil {
 			t.Fatal(err)
