@@ -4,11 +4,11 @@ Living status doc. Read first, update at every phase boundary. Last updated: 202
 
 ## Current state
 
-- Repo cut from `InfiniteRoomLabs/template-repo` and planned. No product code yet.
+- Repo cut from `InfiniteRoomLabs/template-repo` and planned. Phase 0 (Scaffold) has shipped: a Go module with `yasshm version` and `yasshm help`, the full gate, the build, test, lint and fuzz tasks. No product behaviour yet; Phase 1 is next.
 - The plan lives on the branch `feat/yasshm-mvp` here, and the deployment plan lives on a branch of that name in the operator's private infra repo. Nothing has been merged to `main`.
 - The build is one cloud session that holds both repositories and runs the whole roadmap, with a fable orchestrator as lead. It is started with both clones on the plan branch, makes its own working branch in each, and does all its work there. A phase is a commit range on that branch (`GOAL.md`, *How a phase lands*).
 - Planning artifacts are in place: the design spec (`docs/superpowers/specs/2026-11-18-yasshm-design.md`), `GOAL.md` (targeting Phase 0, with the kickoff prompt), the five work orders (`docs/phases/_templates/`), and the LikeC4 model of the planned system (every component is tagged `#planned` until its phase builds it).
-- Toolchain: Go 1.27.4 and golangci-lint 2.15.0 are pinned in `mise.toml` next to the LikeC4 tools. `scripts/bootstrap.sh` installs everything on a bare machine. The gate (`mise run check`) runs the `arch` step only; Phase 0 adds the Go steps.
+- Toolchain: Go 1.27.4 and golangci-lint 2.15.0 are pinned in `mise.toml` next to the LikeC4 tools. `scripts/bootstrap.sh` installs everything on a bare machine. The gate (`mise run check`) runs `fmt lint skipcheck test cover vuln build arch` and fails on a dirty tree. govulncheck 1.10.0 is pinned there too.
 - CI runs the gate on pushes to every branch and on pull requests.
 - No credentials are wired and none are needed: the build never deploys and never touches a secret (spec D16).
 - Spec status: section 2 is locked from the owner's decisions; section 3 still has INFERRED and TODO rows, each with the phase that must settle it.
@@ -26,8 +26,8 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 
 | Phase | Status | Phase base .. ship commit | Notes |
 |---|---|---|---|
-| 0 Scaffold | in progress | base: the commit `docs(phase-0): start scaffold` | Premise results are in the Discoveries below |
-| 1 Config, tenants, policy, audit | not started | -- | |
+| 0 Scaffold | SHIPPED | `34d6001` .. the commit `docs(phase-0): ship scaffold` | Gate: code review REQUEST CHANGES (1 blocking), security PASS, QA NEEDS WORK on the same blocker; fixed in `27e6c67`; gate and CI green after it. Coverage 95.2 percent |
+| 1 Config, tenants, policy, audit | not started | -- | Next |
 | 2 SSH layer | not started | -- | |
 | 3 Jobs, store, outputs | not started | -- | |
 | 4 Authenticator | not started | -- | |
@@ -47,6 +47,8 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 - 2026-11-19 (build, Phase 0 premise): the gate is green on the clean tree the session started from (8 seconds), CI is green on the pushed working branch, and pushing the working branch works. The `agency` plugin is loaded (its skills and agents are listed). Whether its changelog and version guard hooks fire in this session was not observed, so their rules are applied by hand: `CHANGELOG.md` is staged with every ship commit, and `git add` and `git commit` are separate tool calls.
 - 2026-11-19 (build, Phase 0 premise): the module proxy and the vulnerability database are reachable. There is no Docker daemon. There is no `sshd`, and the session's permission layer refused to install `openssh-server`; the lead did not work around it, so the real-`sshd` lane is CI-only (spec section 7 callout, F12). Adding `openssh-server` to the cloud environment's setup script would give a later session the lane locally.
 - 2026-11-19 (build, Phase 0 premise): `scripts/redaction-check.sh` finds the plugin's resolver but the resolver has no term list in this session, so the check prints "no redaction terms configured" and passes. Hygiene is therefore held by rule and by the security lane, not by that script: nothing from the infra clone is quoted here, and fixtures are synthetic.
+- 2026-11-19 (build, Phase 0 gate): the first `cover` step summed every line of the profile, and `-coverpkg=./...` writes one copy of each block per test binary, so the total would have fallen as packages were added (a second tested package measured 45.2 percent where the truth was 93.3). It now merges blocks by key. The code-review and QA lanes both found it by counting statements by hand.
+- 2026-11-19 (build, Phase 0 gate): advisories that were not applied, each for a reason. Pinning the mise version in CI: `scripts/bootstrap.sh` installs the current mise locally too, so a pin in one place would only make the two differ; pin both together if the operator wants it. Flagging `//go:build` tags on test files in `skipcheck`: no test file has a tag yet; Phase 2 must not use a build tag to keep the real-`sshd` tests out of the local gate without the gate saying so. The remaining simplification options (one `cd` in `check.sh`, default-valued lint settings, the step list repeated in `README.md`) change nothing observable and were left.
 
 ## Next action
 

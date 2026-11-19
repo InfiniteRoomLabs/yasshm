@@ -17,10 +17,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Go module `github.com/InfiniteRoomLabs/yasshm` with `cmd/yasshm` with `version` and `help` subcommands (version, commit and build date injected at build time); standard library only
 - The full gate in `scripts/check.sh`: `fmt`, `lint` (`.golangci.yml`), `skipcheck`, `test` (`-race -shuffle=on`, coverage profile), `cover` (floor 85 percent, `internal/testkit` excluded), `vuln` (govulncheck pinned in `mise.toml`), `build`, `arch`
 - `mise run build` (`scripts/build.sh`: linux amd64 and arm64, `CGO_ENABLED=0`, `-trimpath`, `dist/SHA256SUMS`), `mise run test`, `mise run lint`, `mise run fuzz` (`scripts/fuzz.sh`)
+- `mise run build` is reproducible: the build date is `SOURCE_DATE_EPOCH` or the commit time, and a `VERSION` override is validated
 - CI ensures `sshd` is installed on the runner and fails if it is not; `scripts/bootstrap.sh` and the gate report whether `sshd` is present locally (the real-sshd lane is CI-only, spec section 7)
 
 ### Changed
 
+- `GOAL.md` targets Phase 1; `docs/progress.md` records Phase 0 as shipped
 - A dirty working tree now fails the gate (`scripts/check.sh` exits 1) instead of printing a banner
 - `TESTING.md`, `CLAUDE.md` and `README.md` describe the gate as it now is
 - Template placeholders replaced with the project's name and description in `README.md`, `CLAUDE.md`, `AGENTS.md`, `TESTING.md`, `docs/progress.md` and the architecture workspace; the "Using this template" checklist is done and removed

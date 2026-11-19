@@ -2,7 +2,7 @@
 
 One cloud session, one orchestrator, both repositories. It is started once with the kickoff prompt below and ships the approved roadmap one phase at a time through the pipeline: verify premise -> implement -> four-lane review gate -> ship -> retarget this file -> next phase. The design oracle is `docs/superpowers/specs/2026-11-18-yasshm-design.md` (the "spec"); `CLAUDE.md` holds the conventions and dispatch rules; `docs/progress.md` is where we are.
 
-**Shipped so far:** nothing yet. The planning session cut the template, modelled the architecture, and wrote the spec, this file and the work orders. Next target: **Phase 0 (Scaffold)**. Full roadmap in *Retarget* at the bottom.
+**Shipped so far:** Phase 0 (Scaffold): the Go module with `version`, the full gate, the `mise` tasks, CI with `sshd` on the runner, and the sandbox facts settled. Next target: **Phase 1 (Config, tenants, policy, audit)**. Full roadmap in *Retarget* at the bottom.
 
 ## Kickoff
 
@@ -47,30 +47,31 @@ A cloud session can count on pushing exactly one branch per repository: its work
 
 ---
 
-## Goal (current target: Phase 0 -- Scaffold)
+## Goal (current target: Phase 1 -- Config, tenants, policy, audit)
 
-> **Goal -- ship Phase 0 (Scaffold), then go on to Phase 1:**
+> **Goal -- ship Phase 1 (Config, tenants, policy, audit), then go on to Phase 2:**
 >
-> 1. **Verify the premise before building.** Do *Session start* above. Read spec sections 2, 3, 7 and 9 and `CLAUDE.md`. Confirm, and record each result in spec section 3 and `docs/progress.md`:
->    - `mise run check` prints `check.sh: all OK` on the clean tree you start from (F11).
->    - The agent-ops `agency` plugin is loaded (its skills appear in the session's skill list; the environment's setup script installs it). If it is not, its changelog and version guards are absent: apply the same rules by hand and say so in `docs/progress.md`.
->    - F12: can the sandbox install and run a real `sshd` (`apt-get install -y openssh-server`, then start it as the current user on a loopback port with a temporary config and key, and log in with a Go or `ssh` client)? Can `govulncheck` reach its database and `go mod download` reach the module proxy? Is a Docker daemon available (only Phase 8 cares)?
->    - F13, F19: which branch was each clone started on, which branch is the working branch, and does pushing it work? Does CI run on it? Read the result with `gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`. Do not test whether other branch names can be pushed; the design does not need it.
->    - F16: 15 minutes, no more, of search-before-build. Park only on the condition in spec section 1.
+> 1. **Verify the premise before building.** Do *Session start* above. Read spec sections 2 (D5 to D8, D12, D14), 4, 5.1 to 5.4, 5.9 and 6, and `CLAUDE.md`. Confirm, and record each result in spec section 3 and `docs/progress.md`:
+>    - `mise run check` prints `check.sh: all OK` on the clean tree you start from, and CI is green on the head.
+>    - F18 (YAML half): the implementer picks one of the two candidate YAML libraries after checking, in the library's own source or docs, that it can reject unknown keys, reject duplicate keys and report the position or path of each problem. The choice and the reason go into F18.
+>    - The sandbox runs as root, so a file mode alone does not make a write fail. Tests that need an unwritable audit log or an unreadable key use a mechanism that also fails for root (a path under a regular file, a directory in place of the file, `/dev/full` for a failing write) and check key permissions by mode bits, not by trying to open the file.
 >    - Anything wrong: fix the spec with a `> **STATE AS OF YYYY-MM-DD**` callout in the affected section, note it in `docs/progress.md`, and continue.
-> 2. **Implement.** Make the start commit `docs(phase-0): start scaffold` and record the phase base. Dispatch ONE implementer (`general-purpose`, `model: "sonnet"`, work order from `docs/phases/_templates/implementer.md`, pointers to spec sections 2 (D2, D14, D15), 7 and 9). Deliverables, each with an acceptance criterion:
->    - Go module `github.com/InfiniteRoomLabs/yasshm` with `cmd/yasshm` and a `version` subcommand whose values are injected at build time -- `mise run build` writes `dist/yasshm_<version>_linux_amd64` and `_arm64` (`CGO_ENABLED=0`, `-trimpath`) plus `dist/SHA256SUMS`, and the amd64 binary prints a version, a commit and a build date; a unit test covers the command.
->    - The gate of spec section 7 in `scripts/check.sh`: steps `fmt lint skipcheck test cover vuln build arch`, with `.golangci.yml` (warnings are errors; a `nolint` needs a named linter and a reason) -- each step runs alone with `mise run check -- <step>`; `usage lint scripts/check.sh` is clean.
->    - `skipcheck` and `cover` are proven to bite -- the implementer report shows the output of a temporary skipped test failing `skipcheck` and of a floor one point above the measured total failing `cover`; neither temporary change is committed. The floor is 85 and excludes only `internal/testkit/...`.
->    - A dirty tree fails the gate (the banner in `scripts/check.sh` becomes `exit 1`) -- shown in the report.
->    - `mise` tasks `build`, `test`, `lint`, `fuzz` (the last runs every fuzz target for 30 seconds and passes when there are none yet).
->    - The real-`sshd` decision of spec section 7, taken from the F12 result: either `scripts/bootstrap.sh` checks for the binary and CI installs it, or the CI-only arrangement is written into the spec with a callout. The lane itself arrives in Phase 2.
->    - `TESTING.md`, `CLAUDE.md` (commands, gotchas) and `README.md` describe the gate as it now is; `CHANGELOG.md` has the `[Unreleased]` entries.
->    - Acceptance: `mise run check` green on a clean tree, and CI green on the pushed head.
-> 3. **Four-lane gate** -- dispatch code-review, simplification, and security lanes in parallel (read-only), then the QA lane (the only lane that runs the gate); all `general-purpose`, **`model: "opus"`**. Work orders from `docs/phases/_templates/`. Reports to `docs/phases/0/reports/<lane>.md` AND via `SendMessage` to `team-lead` AND as the lane's final text. Commit the three read-only reports before dispatching QA (QA needs a clean tree). Triage, ONE fix commit `fix(scaffold): apply the review-gate findings`, re-run the gate, confirm `git status --porcelain` is empty.
-> 4. **Ship** -- make the ship commit `docs(phase-0): ship scaffold` (body summarises gate results) with `CHANGELOG.md`, `docs/progress.md` and **this file retargeted to Phase 1** (see *Self-advance*); push the working branch; confirm CI green on the ship commit. Then start Phase 1 from *Session start*.
+> 2. **Implement.** Make the start commit `docs(phase-1): start config, tenants, policy, audit` and record the phase base. Dispatch ONE implementer (`general-purpose`, `model: "opus"`, work order from `docs/phases/_templates/implementer.md`, pointers to spec sections 2, 4, 5.1 to 5.4, 5.9, 6 and 7). Deliverables, each with an acceptance criterion:
+>    - `internal/tenant` (spec 5.2): `TenantID`, `Principal`, `AccessLevel` ordered `none < look < full`, `ServerID`, `CommandID`, and the server type with `IdentityFor(level)` -- it depends on nothing else in the module; the level comparison `required <= granted` exists in exactly one function.
+>    - `internal/config` (spec 5.1): strict decoding and every validation rule of 5.1, errors as one line per problem in the form `path.to.key: message`, the limits with their defaults and allowed ranges -- every rule has a passing and a failing test; `access: full` is rejected with the exact message of 5.1; a second tenant is rejected through the one constant `MaxTenants`; a key file readable by group or other is refused; the example config of 5.1 loads when its key path and host key are replaced by ones generated in the test.
+>    - `internal/policy` (spec 5.3): `Decide` with the three checks in order and the codes `not_found`, `access_denied`, `policy_denied`; the built-in command denylist and path denylist each in one file -- every built-in pattern has a must-match and a must-not-match case; a server of another tenant gives `not_found`, never `access_denied`; a grant of `full` built in test code is accepted by the policy engine (D5); operator additions from the config are applied.
+>    - `internal/audit` (spec 5.4): the JSONL writer (`O_APPEND`, mode 0600, synced after each event, UTC RFC 3339 timestamps) and typed constructors for every event of 5.4 -- audit-before-act is proven: with a log that cannot be written the write returns an error and the guarded action in the test does not run; concurrent writers never interleave a line; an existing log is appended to, never truncated; no event type can carry a token or key material.
+>    - `yasshm config check --config <file>` (spec 5.9): exit 0 on a valid file, exit 1 with the error lines on stderr otherwise -- covered by tests through the command function, and by one test that runs it against a file on disk.
+>    - Fuzz targets for the config decoder and for the command and path guard rails, with seed corpora that run in the gate as ordinary tests; `mise run fuzz` finds and runs them.
+>    - Architecture: `yasshm.config`, `yasshm.policy` and `yasshm.audit` lose `#planned` in the same commits that build them; `mise run arch:gen` output committed.
+>    - The dependency rule of spec section 4 holds (`tenant` imports nothing from the module; `config`, `policy`, `audit` import only `tenant`, except that `policy` may take the operator's deny lists as plain values) and a test or lint rule enforces it.
+>    - New dependencies are only a YAML library and `golang.org/x/crypto` (D14), each justified in the report; `mise run check -- vuln` clean.
+>    - `README.md`, `TESTING.md` and `CLAUDE.md` gotchas updated where the phase changed something; `CHANGELOG.md` has the `[Unreleased]` entries.
+>    - Acceptance: `mise run check` green on a clean tree with coverage at or above 85, and CI green on the pushed head.
+> 3. **Four-lane gate** -- dispatch code-review, simplification, and security lanes in parallel (read-only), then the QA lane (the only lane that runs the gate); all `general-purpose`, **`model: "fable"`**. Work orders from `docs/phases/_templates/`. Reports to `docs/phases/1/reports/<lane>.md` AND as the lane's final text (AND via `SendMessage` to `team-lead` where the lane has that tool). Commit the three read-only reports before dispatching QA (QA needs a clean tree). Triage, ONE fix commit `fix(config): apply the review-gate findings`, re-run the gate, confirm `git status --porcelain` is empty.
+> 4. **Ship** -- make the ship commit `docs(phase-1): ship config, tenants, policy, audit` (body summarises gate results) with `CHANGELOG.md`, `docs/progress.md` and **this file retargeted to Phase 2** (see *Self-advance*); push the working branch; confirm CI green on the ship commit. Then start Phase 2 from *Session start*.
 >
-> **Phase 0 is done when:** the deliverables above are met, CI green, the gate green locally on a clean tree, `docs/progress.md` + `CHANGELOG.md` updated, **and `GOAL.md` retargeted to Phase 1 and pushed.**
+> **Phase 1 is done when:** the deliverables above are met, CI green, the gate green locally on a clean tree, `docs/progress.md` + `CHANGELOG.md` updated, **and `GOAL.md` retargeted to Phase 2 and pushed.**
 >
 > **The run is done when** phases 0 to 8 are marked `SHIPPED` in the roadmap below and the attended queue is written under `## Blocked on user` and pushed. **It is also done when** `## Blocked on user` names one concrete action only the user can take and the lead has committed it, pushed it and stopped -- a parked attended step is a clean exit, not a failure. **Stop only** for that, for a genuine decision you + an advisor skill cannot confidently make, or for a permission the harness will not grant.
 >
@@ -88,7 +89,7 @@ Leave `GOAL.md` pointed at the **next** phase, then run it:
 - Append anything you learned to **Lessons** (process traps only -- feature notes go in `docs/progress.md` and spec callouts).
 - **Advance only within the approved roadmap.** If the next row in *Approved roadmap* exists, rewrite the `## Goal` block for it and continue. If it does not, the roadmap is exhausted: write the maintenance/park block below instead of inventing a phase.
 - Any follow-on work the lanes surfaced goes under *Proposed (needs user approval)*, not into the approved roadmap. It runs only after the user approves it (which moves it up into *Approved roadmap*).
-- **Next approved phase after Phase 0: Phase 1 (Config, tenants, policy, audit).**
+- **Next approved phase after Phase 1: Phase 2 (SSH layer).**
 
 ### Parking when the roadmap is exhausted
 
@@ -131,6 +132,16 @@ Added by the planning session (2026-11-18, revised 2026-11-19), specific to this
 - **`gh pr` and `gh issue` fail in a cloud session** (GraphQL is rejected). Use REST: `gh api repos/<owner>/<name>/...`.
 - **A missing tool is never a silent skip.** If a gate step cannot run in the sandbox, that is a finding: record it, move the step to CI with a callout in the spec, and make QA check the CI run.
 
+Added by the build session (2026-11-19):
+
+- **The harness can refuse a step this file asks for** (Phase 0: installing `openssh-server`). Do not retry it and do not reach the same end another way: take the fallback the spec already has, record the refusal with a callout, and tell the user once.
+- **Wait for an agent with one bounded blocking command**, for example a shell loop that ends when the report file or the expected commit exists. Ending the turn to wait makes the goal hook re-prompt.
+- **A lane's report reaches the lead as its final text and as the report file.** That is enough; do not wait for a `SendMessage`.
+- **Resume the implementer for the fix commit** (`SendMessage` to its agent id with the triaged list) instead of briefing a new agent: it already knows the files.
+- **The start commit cannot hold its own SHA.** Write the phase base into the ledger in the ship commit.
+- **The sandbox runs as root.** A file mode does not stop root from reading or writing, so a test that needs an unwritable or unreadable file must use something that fails for root too.
+- **The lead re-runs the gate itself after the fix commit** and reads CI for that commit. A second QA dispatch is only for a fix that changed behaviour the first QA run did not see.
+
 ## Reference
 
 - **Spec:** `docs/superpowers/specs/2026-11-18-yasshm-design.md`. Section 2 is locked; sections 4 to 8 are the build oracle; section 9 is this process.
@@ -155,7 +166,7 @@ Drafted by the planning session on 2026-11-18 from the owner's decisions (spec s
 
 | Phase | Where | Implementer -> Reviewers | Effort | Notes |
 |---|---|---|---|---|
-| **0 Scaffold** | this repo | sonnet -> opus | low | Go module, `version` command, the full gate, `mise` tasks, sandbox facts settled. Spec 7, 9 |
+| ~~**0 Scaffold**~~ | this repo | sonnet -> opus | low | **SHIPPED**, `34d6001` .. the commit `docs(phase-0): ship scaffold`. Lesson: the first coverage step summed one copy of every block per test binary; the review lanes caught it by hand-counting statements, so have QA hand-derive every number a gate step prints |
 | **1 Config, tenants, policy, audit** | this repo | opus -> fable | med | Spec 5.1 to 5.4 and `config check`. `look` only, `full` reserved, one tenant, tenant id everywhere, audit-before-act |
 | **2 SSH layer** | this repo | opus -> fable | high | Spec 5.5. Pinned host keys, exec, signals, SFTP, the in-process test server and the real-`sshd` lane |
 | **3 Jobs, store, outputs** | this repo | opus -> fable | high | Spec 5.6. Lifecycle, paging, limits, retention, restart recovery, SQLite |
