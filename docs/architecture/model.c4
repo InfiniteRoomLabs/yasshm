@@ -81,7 +81,6 @@ model {
     }
 
     audit = datastore 'Audit log' {
-      #planned
       technology 'Append-only JSONL'
       description 'One event per tool call, command and auth decision'
     }

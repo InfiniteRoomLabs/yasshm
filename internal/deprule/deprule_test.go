@@ -20,6 +20,7 @@ var allowed = map[string][]string{
 	"tenant": {},
 	"config": {"internal/tenant"},
 	"policy": {"internal/tenant"},
+	"audit":  {"internal/tenant"},
 }
 
 // testAllowed is added to allowed for _test.go files: test support only.
