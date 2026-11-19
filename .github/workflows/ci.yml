@@ -3,10 +3,10 @@ name: CI
 on:
   pull_request:
   push:
-    # `feat/**` is where a multi-phase build integrates before it reaches main;
-    # `phase-*/**` are the per-phase branches of the GOAL treadmill. Running the
-    # gate on every push to them means "CI green" never needs a pull request.
-    branches: [main, "feat/**", "phase-*/**"]
+    # Every branch, not only main: the build happens on a working branch whose
+    # name the cloud session is given, so no pattern here can be relied on, and
+    # "CI green" must never need a pull request. The filter keeps tags out.
+    branches: ["**"]
   workflow_call:
 
 permissions:
