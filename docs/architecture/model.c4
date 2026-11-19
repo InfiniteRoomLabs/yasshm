@@ -47,9 +47,8 @@ model {
     }
 
     policy = component 'Policy engine' {
-      #planned
       technology 'Go'
-      description 'Tenant grants, access levels, command denylist and size limits'
+      description 'Tenant grants, access levels, command and path denylists, size limits. Domain types live in internal/tenant'
     }
 
     jobs = component 'Job engine' {
