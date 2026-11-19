@@ -29,7 +29,7 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 | 0 Scaffold | SHIPPED | `34d6001` .. the commit `docs(phase-0): ship scaffold` | Gate: code review REQUEST CHANGES (1 blocking), security PASS, QA NEEDS WORK on the same blocker; fixed in `27e6c67`; gate and CI green after it. Coverage 95.2 percent |
 | 1 Config, tenants, policy, audit | SHIPPED | `6cc1f31` .. the commit `docs(phase-1): ship config, tenants, policy, audit` | Gate: code review REQUEST CHANGES (2 blocking), security BLOCK (1 blocking), QA NEEDS WORK (reproduced all three, found a fourth); fixed in `c92a45f`; the lead's probe of that fix found a regression, fixed in `9422125`; gate and CI green after it. Coverage 95.9 percent. YAML library: `go.yaml.in/yaml/v3` (F18) |
 | 2 SSH layer | SHIPPED | `2300f0e` .. the commit `docs(phase-2): ship ssh layer` | Gate: code review REQUEST CHANGES (3 blocking), security BLOCK (2 blocking), QA NEEDS WORK (reproduced them by running code, 4 blocking in all); fixed in `4fe8a13`; gate and CI green after it, 32 of 32 contract scenarios passing against real `sshd` (OpenSSH 10.2) in CI. Coverage 95.7 percent. SFTP library: `github.com/pkg/sftp` |
-| 3 Jobs, store, outputs | not started | -- | Next |
+| 3 Jobs, store, outputs | in progress | base: the commit `docs(phase-3): start jobs, store, outputs` | Premise: gate and CI green on the Phase 2 ship commit; the SQLite driver choice (F18) is the implementer's first step |
 | 4 Authenticator | not started | -- | |
 | 5 MCP endpoint and tools | not started | -- | |
 | 6 End-to-end and hardening | not started | -- | |
