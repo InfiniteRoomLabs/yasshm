@@ -277,6 +277,26 @@ var scenarios = []scenario{
 		}
 		t.Logf("F10 observed (%s): INT HUP QUIT USR1 USR2 KILL accepted and delivered", tg.banner)
 	}},
+	{"corner/closing the session does not stop the command", func(t *testing.T, tg target, c *Client) {
+		cmd, pid, _ := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+		if err := cmd.Close(); err != nil {
+			t.Fatal(err)
+		}
+		st, err := cmd.Wait(context.Background())
+		if err != nil || !st.MayStillRun || st.Outcome != OutcomeNoStatus {
+			t.Fatalf("status %+v err %v", st, err)
+		}
+		// Observe for a second whether anything on the server side ends
+		// the command once its connection is gone.
+		died := poll(time.Second, func() bool { return !alive(pid) })
+		t.Logf("F10 observed (%s): after the client closed the connection the command was still running: %v", tg.banner, !died)
+		if died {
+			t.Fatalf("pid %d ended when the session closed; F10 says closing does not stop a command", pid)
+		}
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+	}},
 	{"sad/a signal after the command ended is not running", func(t *testing.T, tg target, c *Client) {
 		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, "true", nil, nil)
 		if err != nil {
