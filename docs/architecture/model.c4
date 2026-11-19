@@ -52,9 +52,8 @@ model {
     }
 
     jobs = component 'Job engine' {
-      #planned
-      technology 'Go, in-process queue'
-      description 'Command lifecycle: queue, run, time out, kill, recover after restart'
+      technology 'Go (internal/jobs)'
+      description 'Command lifecycle: concurrency limits without a queue, run, time out, kill, recover after restart, janitor; writes the command audit events before acting'
     }
 
     ssh = component 'SSH client' {
@@ -73,9 +72,8 @@ model {
     }
 
     outputs = datastore 'Output store' {
-      #planned
-      technology 'Files on disk'
-      description 'Captured stdout and stderr per command, with retention'
+      technology 'Files on disk (internal/jobs)'
+      description 'Captured stdout and stderr per command under data_dir/tenants/<tenant>/commands/<id>/, with retention and a per-tenant quota'
     }
 
     audit = datastore 'Audit log' {
@@ -91,6 +89,7 @@ model {
     jobs -> ssh 'runs commands and transfers files'
     jobs -> store 'records command state'
     jobs -> outputs 'streams captured output'
+    jobs -> audit 'writes command events before acting'
     auth -> config 'reads the identity mapping'
     policy -> config 'reads tenants, grants and rules'
     ssh -> config 'reads server definitions, the key file and the pinned host keys at connect'

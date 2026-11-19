@@ -25,6 +25,7 @@ var allowed = map[string][]string{
 	"audit":     {"internal/tenant"},
 	"sshclient": {"internal/tenant", "internal/keyfile", "internal/hostkey"},
 	"store":     {"internal/tenant"},
+	"jobs":      {"internal/tenant", "internal/sshclient", "internal/store", "internal/audit"},
 }
 
 // testAllowed is added to allowed for _test.go files: test support only.

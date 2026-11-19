@@ -10,10 +10,10 @@ graph TB
     Yasshm.Tools@{ shape: rectangle, label: "Tool handlers" }
     Yasshm.Policy@{ shape: rectangle, label: "Policy engine" }
     Yasshm.Jobs@{ shape: rectangle, label: "Job engine" }
-    Yasshm.Audit@{ shape: disk, label: "Audit log" }
     Yasshm.Ssh@{ shape: rectangle, label: "SSH client" }
     Yasshm.Store@{ shape: disk, label: "Job store" }
     Yasshm.Outputs@{ shape: disk, label: "Output store" }
+    Yasshm.Audit@{ shape: disk, label: "Audit log" }
     Yasshm.Config@{ shape: rectangle, label: "Config loader" }
   end
   Targets@{ shape: rectangle, label: "SSH target hosts" }
@@ -30,6 +30,7 @@ graph TB
   Yasshm.Jobs -. "`runs commands and transfers files`" .-> Yasshm.Ssh
   Yasshm.Jobs -. "`records command state`" .-> Yasshm.Store
   Yasshm.Jobs -. "`streams captured output`" .-> Yasshm.Outputs
+  Yasshm.Jobs -. "`writes command events before acting`" .-> Yasshm.Audit
   Yasshm.Ssh -. "`reads server definitions, the key file 
 and the pinned host keys at connect`" .-> Yasshm.Config
   Yasshm.Auth -. "`fetches signing keys`" .-> Edge

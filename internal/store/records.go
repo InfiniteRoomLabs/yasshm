@@ -265,11 +265,19 @@ func (s *Store) Finish(ctx context.Context, tid tenant.TenantID, id tenant.Comma
 		f.StdoutBytes, f.StderrBytes, f.StoredBytes, boolInt(f.Truncated), boolInt(f.MayStillRun))
 }
 
+// Sizes reports the output a running record has on disk, for
+// RecoverAllTenants: the bytes stored per stream.
+type Sizes func(r *Record) (stdout, stderr int64)
+
 // RecoverAllTenants marks every running record of every tenant lost with
-// finished_at set to at, and returns them as they now are. It is the one
-// method that spans tenants; the job engine runs it once at start, before it
-// accepts work, and uses the result only to write one audit event per record.
-func (s *Store) RecoverAllTenants(ctx context.Context, at time.Time) ([]Record, error) {
+// finished_at set to at and may_still_run set (nobody stopped the remote
+// process), records the output sizes that sizes reports for it
+// as its byte counts (the gateway that received the output is gone, so what
+// is on disk is all that is known), and returns the records as they now are.
+// It is the one method that spans tenants; the job engine runs it once at
+// start, before it accepts work, and uses the result only to write one audit
+// event per record. sizes may be nil (no output).
+func (s *Store) RecoverAllTenants(ctx context.Context, at time.Time, sizes Sizes) ([]Record, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: recover: %w", err)
@@ -279,30 +287,26 @@ func (s *Store) RecoverAllTenants(ctx context.Context, at time.Time) ([]Record, 
 	if err != nil {
 		return nil, fmt.Errorf("store: recover: %w", err)
 	}
-	var out []Record
-	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("store: recover: %w", err)
-		}
-		out = append(out, r)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("store: recover: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: recover: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE commands SET status = 'lost', finished_at = ? WHERE status = 'running'`, micros(at)); err != nil {
-		return nil, fmt.Errorf("store: recover: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
+	out, err := collect(rows)
+	if err != nil {
 		return nil, fmt.Errorf("store: recover: %w", err)
 	}
 	for i := range out {
-		out[i].Status = StatusLost
-		out[i].FinishedAt = at.UTC().Truncate(time.Microsecond)
+		r := &out[i]
+		var so, se int64
+		if sizes != nil {
+			so, se = sizes(r)
+		}
+		r.Status, r.FinishedAt, r.MayStillRun = StatusLost, at.UTC().Truncate(time.Microsecond), true
+		r.StdoutBytes, r.StderrBytes, r.StoredBytes = max(so, 0), max(se, 0), max(so, 0)+max(se, 0)
+		if _, err := tx.ExecContext(ctx, `UPDATE commands SET status = 'lost', finished_at = ?, stdout_bytes = ?, stderr_bytes = ?, stored_bytes = ?, may_still_run = 1
+			WHERE status = 'running' AND tenant = ? AND id = ?`,
+			micros(at), r.StdoutBytes, r.StderrBytes, r.StoredBytes, r.Tenant, r.ID); err != nil {
+			return nil, fmt.Errorf("store: recover: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: recover: %w", err)
 	}
 	return out, nil
 }

@@ -542,7 +542,12 @@ func TestRecoverAndJanitorQueries(t *testing.T) {
 	finish(ctx, t, s, tA, 2, StatusSucceeded, t0.Add(time.Minute), 5)
 	t.Run("happy/recover marks every running record of every tenant lost", func(t *testing.T) {
 		at := t0.Add(time.Hour)
-		got, err := s.RecoverAllTenants(ctx, at)
+		got, err := s.RecoverAllTenants(ctx, at, func(r *Record) (int64, int64) {
+			if r.Tenant == tB {
+				return 7, -1
+			}
+			return 3, 4
+		})
 		if err != nil || len(got) != 2 {
 			t.Fatal(got, err)
 		}
@@ -551,14 +556,17 @@ func TestRecoverAndJanitorQueries(t *testing.T) {
 				t.Fatalf("%+v", r)
 			}
 			stored, _ := s.Get(ctx, r.Tenant, r.ID)
-			if stored.Status != StatusLost || !stored.FinishedAt.Equal(at) {
+			if stored.Status != StatusLost || !stored.FinishedAt.Equal(at) || stored.StoredBytes != r.StoredBytes || !stored.MayStillRun || !r.MayStillRun {
 				t.Fatalf("stored %+v", stored)
 			}
+		}
+		if got[0].Tenant != tA || got[0].StoredBytes != 7 || got[0].StdoutBytes != 3 || got[1].StoredBytes != 7 || got[1].StderrBytes != 0 {
+			t.Fatalf("sizes: %+v", got)
 		}
 		if r, _ := s.Get(ctx, tA, id(2)); r.Status != StatusSucceeded {
 			t.Fatal("a finished record was recovered")
 		}
-		again, err := s.RecoverAllTenants(ctx, at)
+		again, err := s.RecoverAllTenants(ctx, at, nil)
 		if err != nil || len(again) != 0 {
 			t.Fatal(again, err)
 		}
@@ -623,7 +631,7 @@ func TestClosedStore(t *testing.T) {
 			func() error { _, err := s.Get(ctx, tA, id(1)); return err }(),
 			func() error { _, err := s.Exists(ctx, tA, id(1)); return err }(),
 			s.MarkStarted(ctx, tA, id(1), t0),
-			func() error { _, err := s.RecoverAllTenants(ctx, t0); return err }(),
+			func() error { _, err := s.RecoverAllTenants(ctx, t0, nil); return err }(),
 			func() error { _, _, err := s.List(ctx, tA, Filter{Limit: 1}); return err }(),
 			func() error { _, err := s.FinishedBefore(ctx, tA, t0, 1); return err }(),
 			func() error { _, err := s.StoredBytes(ctx, tA); return err }(),
