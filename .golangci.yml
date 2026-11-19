@@ -45,7 +45,7 @@ linters:
         - diagnostic
         - style
   exclusions:
-    generated: lax
+    generated: strict
 
 issues:
   max-issues-per-linter: 0

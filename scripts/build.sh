@@ -9,8 +9,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 version="${VERSION:-$(git describe --tags --always --dirty)}"
+if ! [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+  echo "build: invalid VERSION '$version' (allowed: letters, digits, . _ + -, starting with a letter or digit)" >&2
+  exit 2
+fi
 commit="$(git rev-parse HEAD)"
-date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Reproducible: SOURCE_DATE_EPOCH if set, else the HEAD commit time.
+epoch="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
+date="$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)"
 pkg="github.com/InfiniteRoomLabs/yasshm/internal/cli"
 ldflags="-s -w -X ${pkg}.Version=${version} -X ${pkg}.Commit=${commit} -X ${pkg}.Date=${date}"
 

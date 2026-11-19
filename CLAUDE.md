@@ -90,8 +90,8 @@ mise run arch:dev                     # live diagram browser at http://localhost
 mise run arch:validate                # LikeC4 syntax + layout-drift check
 mise run arch:fmt                     # format .c4 sources in place
 mise run arch:gen                     # regenerate committed Mermaid diagrams + README splice
-scripts/redaction-check.sh            # staged index; --range <phase base sha>..HEAD for a phase
-usage lint scripts/check.sh           # validate a #USAGE spec
+mise exec -- scripts/redaction-check.sh   # staged index; --range <phase base sha>..HEAD for a phase
+mise exec -- usage lint scripts/check.sh   # validate a #USAGE spec
 gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result without GraphQL
 ```
 
@@ -104,6 +104,8 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - `-race` needs CGO, so the `test` task sets `CGO_ENABLED=1` for the test binary only; `build` is always `CGO_ENABLED=0`.
 - `cover` reads `coverage.out` and fails when it is missing: run `mise run check -- test` first. The floor is `COVER_FLOOR` at the top of `scripts/check.sh`.
 - The sandbox has no `sshd`: `scripts/bootstrap.sh` and the gate print one line saying the real-sshd lane runs in CI only; CI installs `openssh-server` and fails if it is absent.
+- In a cloud session the redaction check has no term list and passes as a no-op, so hygiene is held by rule and by the security lane.
+- `cover` merges duplicate profile blocks by key because `-coverpkg=./...` writes one copy per test binary.
 - govulncheck is pinned in `mise.toml [tools]` through the `go:` backend (`"go:golang.org/x/vuln/cmd/govulncheck"`); bump it to a released version, never `@latest`.
 - LikeC4 is pinned in `mise.toml [env] LIKEC4_VERSION`, not `[tools]` (it is not in the mise registry; every call is `pnpm dlx`). Bump only to a release at least 7 days old -- the pnpm release-age gate refuses younger ones and the failure reads as a resolution error, not a LikeC4 error.
 - `.mcp.json` uses `${CLAUDE_PROJECT_DIR}`, not `${workspaceFolder}`: Claude Code does not expand the VS Code variable and passes it through literally.

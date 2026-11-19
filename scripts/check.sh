@@ -29,15 +29,25 @@ run_lint() {
 }
 
 # A skipped test is a silenced test. t.Skip, t.Skipf, t.SkipNow (also on b and
-# f), and testing.Short() guards all count; each needs an issue link on the
-# same line.
+# f, also taken as a method value or split across lines) and testing.Short
+# guards all count; each needs an issue link on the same line. Scanned: every
+# _test.go file, every .go file under internal/testkit/, and every other .go
+# file that imports "testing".
 run_skipcheck() {
   echo "== skipcheck =="
-  local hits offenders
-  hits=$(cd "$repo_root" && {
-    git ls-files '*_test.go' 'internal/testkit/*'
-    git ls-files --others --exclude-standard '*_test.go' 'internal/testkit/*'
-  } | sort -u | xargs -r grep -nHE '\.(Skip|Skipf|SkipNow)\(|testing\.Short\(\)' || true)
+  local all scan importers hits rc=0 offenders
+  # mapfile + grep rather than xargs: xargs folds "no match" and "error" into one exit code.
+  mapfile -d '' all < <(cd "$repo_root" && git ls-files -z --cached --others --exclude-standard -- '*.go')
+  [ "${#all[@]}" -gt 0 ] || return 0
+  mapfile -d '' scan < <(printf '%s\0' "${all[@]}" | grep -zE '(_test\.go|^internal/testkit/.*\.go)$' || [ $? -eq 1 ])
+  mapfile -d '' importers < <(cd "$repo_root" && grep -lZ '"testing"' -- "${all[@]}" || [ $? -eq 1 ])
+  mapfile -d '' scan < <(printf '%s\0' ${scan[@]+"${scan[@]}"} ${importers[@]+"${importers[@]}"} | sort -zu)
+  [ "${#scan[@]}" -gt 0 ] || return 0
+  hits=$(cd "$repo_root" && grep -nHE '\.(Skip|Skipf|SkipNow)\b|^[[:space:]]*(Skip|Skipf|SkipNow)\(|testing\.Short' -- "${scan[@]}") || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "skipcheck: grep failed (exit $rc)" >&2
+    exit 1
+  fi
   offenders=$(printf '%s\n' "$hits" | grep -vE 'https://github\.com/[^ ]+/issues/[0-9]+' | grep -v '^$' || true)
   if [ -n "$offenders" ]; then
     echo "skipcheck: skipped tests without an issue link on the same line:" >&2
@@ -58,20 +68,27 @@ run_cover() {
     echo "cover: no coverage profile at $coverage_profile -- run the test step first (mise run check -- test)" >&2
     exit 1
   fi
+  # -coverpkg=./... makes every test binary write its own copy of every block,
+  # so the profile holds duplicates. Merge by block key (field 1): a block
+  # counts once and is covered if any copy ran it.
   local total
-  total=$(awk -v floor="$COVER_FLOOR" '
+  total=$(awk '
     NR == 1 && /^mode:/ { next }
     $1 ~ /\/internal\/testkit\// { next }
-    { stmts += $2; if ($3 > 0) covered += $2 }
-    END { if (stmts == 0) { print "none"; exit } printf "%.1f", 100 * covered / stmts }
+    { n[$1] = $2; if ($3 > 0) hit[$1] = 1 }
+    END {
+      for (k in n) { stmts += n[k]; if (k in hit) covered += n[k] }
+      if (stmts == 0) { print "none"; exit }
+      printf "%.6f", 100 * covered / stmts
+    }
   ' "$coverage_profile")
   if [ "$total" = "none" ]; then
     echo "cover: the profile has no statements to measure" >&2
     exit 1
   fi
-  echo "cover: total ${total}% (floor ${COVER_FLOOR}%, internal/testkit excluded)"
+  printf 'cover: total %.1f%% (floor %s%%, internal/testkit excluded)\n' "$total" "$COVER_FLOOR"
   if ! awk -v t="$total" -v f="$COVER_FLOOR" 'BEGIN { exit !(t + 0 >= f + 0) }'; then
-    echo "cover: ${total}% is below the floor of ${COVER_FLOOR}%" >&2
+    printf 'cover: %.1f%% is below the floor of %s%%\n' "$total" "$COVER_FLOOR" >&2
     exit 1
   fi
 }
@@ -123,8 +140,7 @@ run_step() {
 }
 
 if [ "$step" = "all" ]; then
-  # ${steps[@]+...}: bash 3.2 (macOS) errors on an empty array under set -u.
-  for s in ${steps[@]+"${steps[@]}"}; do run_step "$s"; done
+  for s in "${steps[@]}"; do run_step "$s"; done
 else
   run_step "$step"
 fi

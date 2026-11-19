@@ -8,7 +8,7 @@ usage = "6.0.0"
 # node + pnpm are required by the LikeC4 tasks (`pnpm dlx`), on CI too.
 node = "24.14.0"
 pnpm = "11.4.0"
-# The project toolchain. Phase 0 wires these into scripts/check.sh.
+# The project toolchain, used by scripts/check.sh.
 go = "1.27.4"
 golangci-lint = "2.15.0"
 # Pinned to a released version, never @latest.
@@ -22,7 +22,7 @@ golangci-lint = "2.15.0"
 LIKEC4_VERSION = "1.59.2"
 
 [tasks.check]
-description = "The gate: every check step, then a dirty-tree banner"
+description = "The gate: every check step; fails on a dirty tree"
 run = "scripts/check.sh"
 
 [tasks."arch:validate"]

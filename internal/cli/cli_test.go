@@ -19,9 +19,11 @@ func TestRun(t *testing.T) {
 		wantOut    []string
 		wantErr    []string
 		wantNoOut  bool
+		wantNoErr  bool
+		maxErr     int
 		failStdout bool
 	}{
-		{name: "happy/version", args: []string{"version"}, wantCode: 0,
+		{name: "happy/version", args: []string{"version"}, wantCode: 0, wantNoErr: true,
 			wantOut: []string{"yasshm " + Version, "commit " + Commit, "built " + Date}},
 		{name: "sad/no command", args: nil, wantCode: 2, wantNoOut: true,
 			wantErr: []string{"usage: yasshm"}},
@@ -31,7 +33,21 @@ func TestRun(t *testing.T) {
 			wantErr: []string{"takes no arguments"}},
 		{name: "edge/empty string command", args: []string{""}, wantCode: 2, wantNoOut: true,
 			wantErr: []string{"unknown command"}},
-		{name: "sad/stdout write fails", args: []string{"version"}, wantCode: 1, failStdout: true},
+		{name: "sad/stdout write fails", args: []string{"version"}, wantCode: 1, failStdout: true,
+			wantErr: []string{"yasshm: write failed"}},
+		{name: "sad/help write fails", args: []string{"help"}, wantCode: 1, failStdout: true,
+			wantErr: []string{"yasshm: write failed"}},
+		{name: "happy/help", args: []string{"help"}, wantCode: 0, wantNoErr: true,
+			wantOut: []string{"usage: yasshm", "version"}},
+		{name: "happy/-h", args: []string{"-h"}, wantCode: 0, wantNoErr: true,
+			wantOut: []string{"usage: yasshm"}},
+		{name: "happy/--help", args: []string{"--help"}, wantCode: 0, wantNoErr: true,
+			wantOut: []string{"usage: yasshm"}},
+		{name: "raging/hostile argument is bounded and quoted",
+			args: []string{"x\x00\n" + strings.Repeat("A", 100000)}, wantCode: 2, wantNoOut: true,
+			wantErr: []string{"unknown command", `\x00\n`, "usage: yasshm"}, maxErr: 1000},
+		{name: "corner/many arguments after unknown command", args: append([]string{"nope"}, make([]string, 1000)...),
+			wantCode: 2, wantNoOut: true, wantErr: []string{`unknown command "nope"`}, maxErr: 1000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -54,6 +70,12 @@ func TestRun(t *testing.T) {
 				if !strings.Contains(errb.String(), s) {
 					t.Errorf("stderr %q missing %q", errb.String(), s)
 				}
+			}
+			if tt.wantNoErr && errb.Len() != 0 {
+				t.Errorf("unexpected stderr %q", errb.String())
+			}
+			if tt.maxErr > 0 && errb.Len() > tt.maxErr {
+				t.Errorf("stderr is %d bytes, want at most %d", errb.Len(), tt.maxErr)
 			}
 			if tt.wantNoOut && out.Len() != 0 {
 				t.Errorf("unexpected stdout %q", out.String())
