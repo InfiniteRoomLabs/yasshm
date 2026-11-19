@@ -18,6 +18,7 @@ const module = "github.com/InfiniteRoomLabs/yasshm"
 // map may import anything; add it here when its phase builds it.
 var allowed = map[string][]string{
 	"tenant": {},
+	"config": {"internal/tenant"},
 }
 
 // testAllowed is added to allowed for _test.go files: test support only.

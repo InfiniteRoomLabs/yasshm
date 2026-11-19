@@ -65,7 +65,6 @@ model {
     }
 
     config = component 'Config loader' {
-      #planned
       technology 'YAML file on the host'
       description 'Servers, tenants, grants and rules. Never readable or writable through MCP'
     }
