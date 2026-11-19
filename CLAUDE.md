@@ -8,7 +8,7 @@ Cut from `InfiniteRoomLabs/template-repo`. This file is the living rulebook: whe
 
 - It runs on the `/goal` treadmill (agent-ops `agency` plugin), adapted to **one cloud session that runs the whole roadmap**. The session is started once with the kickoff prompt in `GOAL.md`. Its lead is an orchestrator on the fable model: it dispatches, verifies and ships, and subagents build and review. When a phase ships, the lead retargets `GOAL.md` and goes straight on to the next phase.
 - The planning is done: the spec, `GOAL.md` and the work orders were written on 2026-11-18 and revised on 2026-11-19. Do not run `/new-goal-loop` again.
-- The build session holds **two repositories**: this one (public) and the operator's infra repository (private). Each clone starts on its default branch, and the session works on its own working branch in each. `GOAL.md` *Session start* is the checklist; do it at kickoff and again before every phase.
+- The build session holds **two repositories**: this one (public) and the operator's infra repository (private). The session is started with both clones on the plan branch `feat/yasshm-mvp` and works on its own working branch in each. `GOAL.md` *Session start* is the checklist; do it at kickoff and again before every phase.
 
 ## Read-first
 
@@ -25,8 +25,8 @@ Everything that can be tested without those things must be tested, automatically
 
 ## Two repositories, one working branch in each
 
-- **The plan branch is `feat/yasshm-mvp`** in both repos. It holds the plan and nothing else; the session merges it into its working branch once, at kickoff, and never pushes to it.
-- **The working branch** of a clone is the branch the session was started on or told to develop on (a `claude/...` name). All work lands there and it is the only branch the session pushes. There are no phase branches and no merges: a phase is the commit range from `docs(phase-<n>): start <name>` to `docs(phase-<n>): ship <name>`. `GOAL.md` *How a phase lands* has the steps.
+- **The plan branch is `feat/yasshm-mvp`** in both repos. It holds the plan and nothing else; the session starts from it (or, if a clone started elsewhere, merges it in at kickoff) and never pushes to it.
+- **The working branch** of a clone is the branch the session was told to develop on, or the `claude/...` branch the clone was already on; if there is neither, the session creates `claude/yasshm-mvp`. All work lands there and it is the only branch the session pushes. There are no phase branches and no merges: a phase is the commit range from `docs(phase-<n>): start <name>` to `docs(phase-<n>): ship <name>`. `GOAL.md` *How a phase lands* has the steps.
 - **Push the working branch after every green commit.** The session's machine can be reclaimed while it is idle; a reopened session starts from a fresh clone.
 - Work in the infra repo only in Phase 8, on the working branch there, under that repo's own `CLAUDE.md` and `CONTRIBUTING.md`. Read them first; they differ from this file (secret handling, changelog, layout).
 - **This repo is public, the infra repo is private.** Nothing from the infra repo -- host names, addresses, account or tenant ids, vault item names, the text of its plan documents -- goes into a file, report, commit message or branch name here. Refer to "the infra repo's plan document".
@@ -100,7 +100,7 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - `.mcp.json` uses `${CLAUDE_PROJECT_DIR}`, not `${workspaceFolder}`: Claude Code does not expand the VS Code variable and passes it through literally.
 - The first `mise run check` on a clean machine downloads ~120 MB of LikeC4; it is cached after that. There is no SVG export -- diagrams are committed as Mermaid so GitHub renders them; PNG needs Playwright and is not in the gate.
 - The VS Code LikeC4 extension registers its own `likec4` MCP server, so you may see two. Both work; pick one.
-- **Cloud session with two repositories:** it starts in the directory above the clones, with each clone on its default branch, and loads no hooks, permission rules, `env` or MCP servers from either repo's `.claude/settings.json`; plugins come from the environment's setup script (spec F14, F19). So nothing bootstraps itself: run `scripts/bootstrap.sh`, and use absolute paths or `git -C <dir>`.
+- **Cloud session with two repositories:** it starts in the directory above the clones and loads no hooks, permission rules, `env` or MCP servers from either repo's `.claude/settings.json`; plugins come from the environment's setup script (spec F14). So nothing bootstraps itself: run `scripts/bootstrap.sh`, and use absolute paths or `git -C <dir>`.
 - **An idle cloud session loses its disk eventually.** The machine is paused, then reclaimed; reopening the session gives a fresh clone. Anything not pushed is gone (spec F20).
 - `mise` is installed to `$HOME/.local/bin` and the installer does not edit shell profiles. If `mise` is "not found", call `$HOME/.local/bin/mise`.
 - **GitHub from a cloud session:** tag pushes and branch deletions are rejected, and so is GraphQL, so `gh pr` and `gh issue` fail. Use REST (`gh api repos/...`). Whether a push to a branch outside `claude/` is accepted is unsettled (spec F13); do not find out by trying, push only the working branch.

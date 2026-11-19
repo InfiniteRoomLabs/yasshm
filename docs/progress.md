@@ -6,7 +6,7 @@ Living status doc. Read first, update at every phase boundary. Last updated: 202
 
 - Repo cut from `InfiniteRoomLabs/template-repo` and planned. No product code yet.
 - The plan lives on the branch `feat/yasshm-mvp` here, and the deployment plan lives on a branch of that name in the operator's private infra repo. Nothing has been merged to `main`.
-- The build is one cloud session that holds both repositories and runs the whole roadmap, with a fable orchestrator as lead. Each clone starts on its default branch; the session merges the plan branch into its own working branch at kickoff and does all its work there. A phase is a commit range on that branch (`GOAL.md`, *How a phase lands*).
+- The build is one cloud session that holds both repositories and runs the whole roadmap, with a fable orchestrator as lead. It is started with both clones on the plan branch, makes its own working branch in each, and does all its work there. A phase is a commit range on that branch (`GOAL.md`, *How a phase lands*).
 - Planning artifacts are in place: the design spec (`docs/superpowers/specs/2026-11-18-yasshm-design.md`), `GOAL.md` (targeting Phase 0, with the kickoff prompt), the five work orders (`docs/phases/_templates/`), and the LikeC4 model of the planned system (every component is tagged `#planned` until its phase builds it).
 - Toolchain: Go 1.27.4 and golangci-lint 2.15.0 are pinned in `mise.toml` next to the LikeC4 tools. `scripts/bootstrap.sh` installs everything on a bare machine. The gate (`mise run check`) runs the `arch` step only; Phase 0 adds the Go steps.
 - CI runs the gate on pushes to every branch and on pull requests.
@@ -42,7 +42,7 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 - 2026-11-18 (planning): a cloud session with several repositories starts above the clones and loads no hooks or settings from either repo, so the toolchain is installed by `scripts/bootstrap.sh` at the start of every phase, not by a session hook (spec F14).
 - 2026-11-18 (planning): the planning sandbox had no `ssh` or `sshd` binary and no running Docker daemon. Phase 0 decides how the real-`sshd` test lane runs (spec F12, section 7).
 - 2026-11-18 (planning): the edge may cut a request whose origin is silent for about 100 seconds, so the default ceiling for a synchronous wait is 60 seconds, not the client's 300 (spec F15, still INFERRED).
-- 2026-11-19 (planning): a session with several repositories cannot pick a branch per repository, so the build cannot start on the plan branch. The plan was reworked: one session, one working branch per clone, no phase branches, no merges (spec F13, F19, F20, section 9).
+- 2026-11-19 (planning): the build was reworked from one run per phase on shared branches to one session that runs the whole roadmap on one working branch per clone, with no phase branches and no merges. Reasons: a session can count on pushing only its own working branch (spec F13), and an idle session's disk is not kept (spec F20). A session can start each clone on a chosen branch (spec F19), so it starts on the plan branch.
 
 ## Next action
 

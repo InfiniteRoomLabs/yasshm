@@ -6,10 +6,10 @@ One cloud session, one orchestrator, both repositories. It is started once with 
 
 ## Kickoff
 
-Start one cloud session with this repo and the operator's infra repo attached, on the fable model. Each clone starts on its default branch; that is expected. Send:
+Start one cloud session with this repo and the operator's infra repo attached, both on the branch `feat/yasshm-mvp`, on the fable model. (If a clone starts on its default branch instead, the prompt still works: it merges the plan in.) Send:
 
 ```text
-/goal The approved roadmap in yasshm/GOAL.md is shipped through Phase 8 and its attended queue is written under "Blocked on user" and pushed -- or "Blocked on user" names one action only the user can take. First, in each of the two clones: the branch you were started on or told to develop on is your working branch for that repo (if you are on the default branch with no such instruction, create and switch to claude/yasshm-mvp). Then bring in the plan: git fetch origin feat/yasshm-mvp, then git merge --no-edit FETCH_HEAD (never rebase; if CHANGELOG.md conflicts, keep both sides' entries). Then read yasshm/GOAL.md from "Session start" and follow it. You are the orchestrator: subagents build and review; you dispatch, verify and ship.
+/goal The approved roadmap in yasshm/GOAL.md is shipped through Phase 8 and its attended queue is written under "Blocked on user" and pushed -- or "Blocked on user" names one action only the user can take. First, in each of the two clones: your working branch is the branch you were told to develop on, or the claude/... branch the clone is already on; if there is neither, create and switch to claude/yasshm-mvp. It is never the default branch and never feat/yasshm-mvp. Then bring in the plan: git fetch origin feat/yasshm-mvp, then git merge --no-edit FETCH_HEAD (a no-op if the clone started from that branch; never rebase; if CHANGELOG.md conflicts, keep both sides' entries). Then read yasshm/GOAL.md from "Session start" and follow it. You are the orchestrator: subagents build and review; you dispatch, verify and ship.
 ```
 
 ---
@@ -19,7 +19,7 @@ Start one cloud session with this repo and the operator's infra repo attached, o
 You are compacted during a run this long. Do not trust what you remember: do these steps from the files, every phase.
 
 1. **Find the clones.** The session starts in the directory above them. This repo is the directory that holds this file. The other git clone beside it is the operator's private infra repository. Use absolute paths and `git -C <dir>` everywhere; never rely on the working directory.
-2. **Working branches.** In each clone, the working branch is the one this session was started on (or told to develop on). It is never the default branch and never `feat/yasshm-mvp`. It must contain the plan: after `git -C <dir> fetch origin feat/yasshm-mvp`, the check `git -C <dir> merge-base --is-ancestor FETCH_HEAD HEAD` succeeds; if it does not, run the merge from the kickoff prompt (a shallow clone that reports unrelated histories needs `git -C <dir> fetch --deepen=200 origin` first). If this session replaces an earlier one (the phase ledger in `docs/progress.md` is behind what a `claude/...` branch on the remote shows), fetch that branch and merge it into your working branch before anything else.
+2. **Working branches.** In each clone, the working branch is the one this session was told to develop on, or the `claude/...` branch the clone was already on; if there is neither, create `claude/yasshm-mvp`. It is never the default branch and never `feat/yasshm-mvp`. It must contain the plan: after `git -C <dir> fetch origin feat/yasshm-mvp`, the check `git -C <dir> merge-base --is-ancestor FETCH_HEAD HEAD` succeeds; if it does not, run the merge from the kickoff prompt (a shallow clone that reports unrelated histories needs `git -C <dir> fetch --deepen=200 origin` first). If this session replaces an earlier one (the phase ledger in `docs/progress.md` is behind what a `claude/...` branch on the remote shows), fetch that branch and merge it into your working branch before anything else.
 3. **Read the rulebook of a repo before touching it:** `CLAUDE.md` here, and the infra repo's own `CLAUDE.md` and `CONTRIBUTING.md` before any work there (Phase 8 only). The two repos have different rules; neither overrides the other.
 4. **Toolchain:** run `scripts/bootstrap.sh` (installs `mise` and the pinned tools; a no-op when current). If `mise` is not on `PATH`, call it as `$HOME/.local/bin/mise`.
 5. **Clean and pushed:** `git status --porcelain` is empty in both clones, and each working branch is pushed (`git -C <dir> push -u origin HEAD`). If a push of the working branch is refused, that is a `Blocked on user` item, not something to work around.
@@ -27,7 +27,7 @@ You are compacted during a run this long. Do not trust what you remember: do the
 
 ## How a phase lands (one branch per clone, no merges)
 
-A cloud session can count on pushing exactly one branch per repository: its working branch (spec F13, F19). So there are no phase branches and no merges. A phase is a commit range on the working branch:
+A cloud session can count on pushing exactly one branch per repository: its working branch (spec F13). So there are no phase branches and no merges. A phase is a commit range on the working branch:
 
 1. **Start commit:** `docs(phase-<n>): start <name>` sets the phase's row in the `docs/progress.md` ledger to in progress. Its SHA is the **phase base**; record it in the ledger.
 2. **Work:** the implementer commits on the working branch and pushes after every green commit.
@@ -55,7 +55,7 @@ A cloud session can count on pushing exactly one branch per repository: its work
 >    - `mise run check` prints `check.sh: all OK` on the clean tree you start from (F11).
 >    - The agent-ops `agency` plugin is loaded (its skills appear in the session's skill list; the environment's setup script installs it). If it is not, its changelog and version guards are absent: apply the same rules by hand and say so in `docs/progress.md`.
 >    - F12: can the sandbox install and run a real `sshd` (`apt-get install -y openssh-server`, then start it as the current user on a loopback port with a temporary config and key, and log in with a Go or `ssh` client)? Can `govulncheck` reach its database and `go mod download` reach the module proxy? Is a Docker daemon available (only Phase 8 cares)?
->    - F13, F19: which branch was each clone started on, and does pushing the working branch work? Does CI run on it? Read the result with `gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`. Do not test whether other branch names can be pushed; the design does not need it.
+>    - F13, F19: which branch was each clone started on, which branch is the working branch, and does pushing it work? Does CI run on it? Read the result with `gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`. Do not test whether other branch names can be pushed; the design does not need it.
 >    - F16: 15 minutes, no more, of search-before-build. Park only on the condition in spec section 1.
 >    - Anything wrong: fix the spec with a `> **STATE AS OF YYYY-MM-DD**` callout in the affected section, note it in `docs/progress.md`, and continue.
 > 2. **Implement.** Make the start commit `docs(phase-0): start scaffold` and record the phase base. Dispatch ONE implementer (`general-purpose`, `model: "sonnet"`, work order from `docs/phases/_templates/implementer.md`, pointers to spec sections 2 (D2, D14, D15), 7 and 9). Deliverables, each with an acceptance criterion:
