@@ -11,6 +11,8 @@ pnpm = "11.4.0"
 # The project toolchain. Phase 0 wires these into scripts/check.sh.
 go = "1.27.4"
 golangci-lint = "2.15.0"
+# Pinned to a released version, never @latest.
+"go:golang.org/x/vuln/cmd/govulncheck" = "1.10.0"
 
 [env]
 # LikeC4 is not in the mise registry, so it is invoked through `pnpm dlx` and
@@ -38,3 +40,21 @@ run = "scripts/arch-gen.sh"
 [tasks."arch:dev"]
 description = "Live-reloading diagram browser at http://localhost:5173"
 run = "pnpm dlx --config.enable-global-virtual-store=false -y likec4@$LIKEC4_VERSION start"
+
+[tasks.build]
+description = "Build dist/yasshm_<version>_linux_{amd64,arm64} and dist/SHA256SUMS"
+run = "scripts/build.sh"
+
+[tasks.test]
+description = "Tests with -race and a coverage profile (coverage.out)"
+# -race needs CGO for the test binary only; builds stay CGO off.
+env = { CGO_ENABLED = "1" }
+run = "go test -race -shuffle=on -count=1 -coverpkg=./... -coverprofile=coverage.out ./..."
+
+[tasks.lint]
+description = "golangci-lint (warnings are errors)"
+run = "golangci-lint run ./..."
+
+[tasks.fuzz]
+description = "Run every Fuzz target for 30 seconds"
+run = "scripts/fuzz.sh"

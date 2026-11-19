@@ -6,13 +6,85 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 step="${usage_step:-all}"
 
-# Add one run_<step> function per gate step this project needs, list the step
-# names in `steps`, and wire them into run_step's case. Ships with only the
-# language-agnostic `arch` step so `mise run check` is green on a fresh clone
-# of any language.
-#
-#   run_lint() { echo "== lint =="; (cd "$repo_root" && <lint command>); }
-#   run_test() { echo "== test =="; (cd "$repo_root" && <test command>); }
+# Minimum total statement coverage, in percent. Only internal/testkit/... is
+# excluded from the measurement (spec section 7); no other exclusion is allowed.
+COVER_FLOOR=85
+
+coverage_profile="$repo_root/coverage.out"
+
+run_fmt() {
+  echo "== fmt =="
+  local bad
+  bad=$(cd "$repo_root" && { git ls-files '*.go'; git ls-files --others --exclude-standard '*.go'; } | sort -u | xargs -r mise exec -- gofmt -l)
+  if [ -n "$bad" ]; then
+    echo "fmt: these files are not gofmt-clean (run gofmt -w on them):" >&2
+    echo "$bad" >&2
+    exit 1
+  fi
+}
+
+run_lint() {
+  echo "== lint =="
+  (cd "$repo_root" && mise run lint)
+}
+
+# A skipped test is a silenced test. t.Skip, t.Skipf, t.SkipNow (also on b and
+# f), and testing.Short() guards all count; each needs an issue link on the
+# same line.
+run_skipcheck() {
+  echo "== skipcheck =="
+  local hits offenders
+  hits=$(cd "$repo_root" && {
+    git ls-files '*_test.go' 'internal/testkit/*'
+    git ls-files --others --exclude-standard '*_test.go' 'internal/testkit/*'
+  } | sort -u | xargs -r grep -nHE '\.(Skip|Skipf|SkipNow)\(|testing\.Short\(\)' || true)
+  offenders=$(printf '%s\n' "$hits" | grep -vE 'https://github\.com/[^ ]+/issues/[0-9]+' | grep -v '^$' || true)
+  if [ -n "$offenders" ]; then
+    echo "skipcheck: skipped tests without an issue link on the same line:" >&2
+    echo "$offenders" >&2
+    exit 1
+  fi
+}
+
+run_test() {
+  echo "== test =="
+  rm -f "$coverage_profile"
+  (cd "$repo_root" && mise run test)
+}
+
+run_cover() {
+  echo "== cover =="
+  if [ ! -s "$coverage_profile" ]; then
+    echo "cover: no coverage profile at $coverage_profile -- run the test step first (mise run check -- test)" >&2
+    exit 1
+  fi
+  local total
+  total=$(awk -v floor="$COVER_FLOOR" '
+    NR == 1 && /^mode:/ { next }
+    $1 ~ /\/internal\/testkit\// { next }
+    { stmts += $2; if ($3 > 0) covered += $2 }
+    END { if (stmts == 0) { print "none"; exit } printf "%.1f", 100 * covered / stmts }
+  ' "$coverage_profile")
+  if [ "$total" = "none" ]; then
+    echo "cover: the profile has no statements to measure" >&2
+    exit 1
+  fi
+  echo "cover: total ${total}% (floor ${COVER_FLOOR}%, internal/testkit excluded)"
+  if ! awk -v t="$total" -v f="$COVER_FLOOR" 'BEGIN { exit !(t + 0 >= f + 0) }'; then
+    echo "cover: ${total}% is below the floor of ${COVER_FLOOR}%" >&2
+    exit 1
+  fi
+}
+
+run_vuln() {
+  echo "== vuln =="
+  (cd "$repo_root" && mise exec -- govulncheck ./...)
+}
+
+run_build() {
+  echo "== build =="
+  (cd "$repo_root" && mise run build)
+}
 
 run_arch() {
   echo "== arch =="
@@ -31,13 +103,18 @@ run_arch() {
   # when this project has a Node test runner.
 }
 
-steps=(arch)   # e.g. steps=(fmt lint test cover build arch)
+steps=(fmt lint skipcheck test cover vuln build arch)
 
 run_step() {
   case "$1" in
+  fmt) run_fmt ;;
+  lint) run_lint ;;
+  skipcheck) run_skipcheck ;;
+  test) run_test ;;
+  cover) run_cover ;;
+  vuln) run_vuln ;;
+  build) run_build ;;
   arch) run_arch ;;
-  # lint) run_lint ;;
-  # test) run_test ;;
   *)
     echo "check.sh: unknown step: $1" >&2
     exit 2
@@ -52,13 +129,17 @@ else
   run_step "$step"
 fi
 
+if ! command -v sshd >/dev/null 2>&1 && [ ! -x /usr/sbin/sshd ]; then
+  echo "check.sh: sshd is not installed here; the real-sshd lane runs in CI only (spec section 7)"
+fi
+
 dirty=$(cd "$repo_root" && git status --porcelain)
 if [ -n "$dirty" ]; then
   echo
-  echo "!! gate ran on a DIRTY tree -- this result describes disk, not HEAD:"
+  echo "!! FAIL: the tree is DIRTY -- a result on a dirty tree describes disk, not HEAD:"
   echo "$dirty"
   echo
-  # Flip to a hard gate once this repo runs review lanes: exit 1
+  exit 1
 fi
 
 echo "check.sh: $step OK"
