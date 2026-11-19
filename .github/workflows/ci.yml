@@ -29,4 +29,11 @@ jobs:
           path: ~/.cache/pnpm/dlx
           key: pnpm-dlx-likec4-${{ hashFiles('mise.toml') }}
           restore-keys: pnpm-dlx-likec4-
+      # The real-sshd lane (Phase 2) runs here, not in the local sandbox, which
+      # has no sshd (spec section 7). Make sure the runner has it; fail if not.
+      - name: Ensure sshd is installed
+        run: |
+          export PATH="$PATH:/usr/sbin"
+          command -v sshd || (sudo apt-get update && sudo apt-get install -y openssh-server)
+          command -v sshd
       - run: mise run check

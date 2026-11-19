@@ -24,6 +24,13 @@ mise install
 echo "bootstrap: toolchain ready ($(mise --version | head -1))"
 mise ls --current
 
+# The real-sshd test lane needs an sshd binary; its absence is reported, never fatal.
+if sshd_path="$(command -v sshd 2>/dev/null || ls /usr/sbin/sshd 2>/dev/null)" && [ -n "$sshd_path" ]; then
+  echo "bootstrap: sshd found at $sshd_path (the real-sshd lane can run locally)"
+else
+  echo "bootstrap: sshd not found; the real-sshd lane runs in CI only"
+fi
+
 if [ "$(command -v mise)" = "$HOME/.local/bin/mise" ]; then
   echo "bootstrap: mise is at $HOME/.local/bin/mise -- call it by that path if your shell does not have that directory on PATH"
 fi
