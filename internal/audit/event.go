@@ -252,7 +252,21 @@ func GatewayStarted(version, listen string) Event {
 	return Event{record{Event: EventGatewayStarted, Version: version, Listen: listen}}
 }
 
-// GatewayStopped records a clean stop and why (for example "signal").
-func GatewayStopped(reason string) Event {
-	return Event{record{Event: EventGatewayStopped, Reason: reason}}
+// StopReason says why the gateway stopped. The values are fixed.
+type StopReason struct{ s string }
+
+// The reasons for gateway.stopped.
+var (
+	// StopSignal: the process got SIGTERM or SIGINT.
+	StopSignal = StopReason{"signal"}
+	// StopError: a fatal error ended the gateway.
+	StopError = StopReason{"error"}
+)
+
+// String returns the reason's text.
+func (r StopReason) String() string { return r.s }
+
+// GatewayStopped records a stop and why.
+func GatewayStopped(reason StopReason) Event {
+	return Event{record{Event: EventGatewayStopped, Reason: reason.s}}
 }

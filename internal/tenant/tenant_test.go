@@ -80,9 +80,18 @@ func TestPermits(t *testing.T) {
 			})
 		}
 	}
-	t.Run("corner/undefined grant above full", func(t *testing.T) {
-		if !Permits(AccessLevel(9), AccessFull) {
-			t.Fatal("an out-of-range grant compares numerically")
+	t.Run("corner/undefined grant above full permits nothing", func(t *testing.T) {
+		for _, req := range []AccessLevel{AccessNone, AccessLook, AccessFull, AccessLevel(9)} {
+			if Permits(AccessLevel(9), req) {
+				t.Fatalf("an out-of-range grant permits %v", req)
+			}
+		}
+	})
+	t.Run("corner/undefined requirement is never permitted", func(t *testing.T) {
+		for _, g := range []AccessLevel{AccessNone, AccessLook, AccessFull} {
+			if Permits(g, AccessLevel(3)) || Permits(g, AccessLevel(255)) {
+				t.Fatalf("grant %v permits an out-of-range requirement", g)
+			}
 		}
 	})
 }
@@ -121,6 +130,9 @@ func TestPrincipalMatch(t *testing.T) {
 		{"edge/empty subject", PrincipalMatch{}, KindUser, "", false},
 		{"edge/empty service subject", PrincipalMatch{}, KindService, "", false},
 		{"raging/unknown kind", email, PrincipalKind(7), "operator@example.net", false},
+		{"raging/Kelvin sign does not fold to k", PrincipalMatch{Email: "k@example.net"}, KindUser, "\u212a@example.net", false},
+		{"raging/long s does not fold to s", PrincipalMatch{Email: "s@example.net"}, KindUser, "\u017f@example.net", false},
+		{"raging/non-ASCII entry never matches", PrincipalMatch{Email: "\u00e9@example.net"}, KindUser, "\u00e9@example.net", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

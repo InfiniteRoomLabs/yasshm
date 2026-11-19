@@ -17,10 +17,18 @@
 //
 // After any failed write or sync the Logger refuses every later write: a
 // failed write may have left a partial line, and appending to it would make
-// the log ambiguous. The gateway fails closed until it is restarted.
+// the log ambiguous. The gateway fails closed until it is restarted, and
+// Open ends an unterminated last line first, so a line left half-written by
+// a crash cannot swallow the next event.
+//
+// Open refuses a symbolic link with O_NOFOLLOW, which covers the last
+// element of the path only: a link in a parent directory is followed. That
+// is enough because whoever can change the gateway's directories is root on
+// the gateway host, which is outside the threat model (spec section 6).
 package audit
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +41,13 @@ import (
 
 // ErrClosed is returned by Write after Close.
 var ErrClosed = errors.New("audit: log is closed")
+
+// ErrNoName is returned by Write for an Event that no constructor built.
+var ErrNoName = errors.New("audit: event has no name")
+
+// euid is the effective uid that must own the log; a variable so tests can
+// check a mismatch without root.
+var euid = os.Geteuid
 
 // file is what the Logger writes to; *os.File in production.
 type file interface {
@@ -60,12 +75,20 @@ func WithClock(now func() time.Time) Option {
 }
 
 // Open opens (creating it with mode 0600 if needed) the audit log at path for
-// appending. It refuses a path that is a symbolic link, is not a regular
-// file, or whose mode gives group or other any access; the mode is read from
-// the open file, so the check also holds for root.
+// appending. It refuses a path that is a symbolic link or is not a regular
+// file (checked before opening, so a FIFO cannot block it, and again on the
+// open file), whose mode gives group or other any access, or that is not
+// owned by the effective uid. Mode and owner are read from the open file,
+// so the checks also hold for root. If the existing log does not end in a
+// newline, Open writes one.
 func Open(path string, opts ...Option) (*Logger, error) {
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() && fi.Mode()&os.ModeSymlink == 0 {
+		return nil, fmt.Errorf("audit: %s is not a regular file", path)
+	}
 	// The path comes from the operator's config; opening it is the point.
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600) //nolint:gosec // G304: the audit log path is the operator's config
+	// O_RDWR so the last byte can be read; O_NONBLOCK so a FIFO swapped in
+	// after the check cannot block.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600) //nolint:gosec // G304: the audit log path is the operator's config
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
@@ -82,7 +105,33 @@ func Open(path string, opts ...Option) (*Logger, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("audit: %s is accessible by group or other (mode %04o); it must be 0600 or stricter", path, perm)
 	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != euid() {
+		_ = f.Close()
+		return nil, fmt.Errorf("audit: %s is not owned by the gateway's uid %d", path, euid())
+	}
+	if err := terminateLastLine(f, fi.Size()); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("audit: %s: %w", path, err)
+	}
 	return newLogger(f, opts...), nil
+}
+
+// terminateLastLine appends a newline when the file's last byte is not one.
+func terminateLastLine(f *os.File, size int64) error {
+	if size == 0 {
+		return nil
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, size-1); err != nil {
+		return fmt.Errorf("read last byte: %w", err)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	if _, err := f.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("end the last line: %w", err)
+	}
+	return f.Sync()
 }
 
 func newLogger(f file, opts ...Option) *Logger {
@@ -106,12 +155,19 @@ func (l *Logger) Write(ev Event) error {
 		return fmt.Errorf("audit: log unusable after an earlier failure: %w", l.broken)
 	}
 	rec := ev.rec
+	if rec.Event == "" {
+		return ErrNoName
+	}
 	rec.TS = l.now().UTC().Format(time.RFC3339Nano)
-	line, err := json.Marshal(rec)
-	if err != nil {
+	// No HTML escaping, so & < > stay greppable; JSON string escaping still
+	// keeps every newline inside the one line. Encode adds the newline.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(rec); err != nil {
 		return fmt.Errorf("audit: encode %s: %w", rec.Event, err)
 	}
-	line = append(line, '\n')
+	line := buf.Bytes()
 	n, err := l.f.Write(line)
 	if err == nil && n != len(line) {
 		err = io.ErrShortWrite

@@ -46,17 +46,14 @@ func checkInvariants(t *testing.T, cfg *Config) {
 				t.Fatalf("accepted identity %+v", id)
 			}
 		}
-		l := tn.Limits
-		for _, s := range limitTable {
-			if v := *s.field(&l); v < s.min || v > s.max {
-				t.Fatalf("accepted %s = %d", s.key, v)
+		for _, w := range wantLimits {
+			if v := w.get(tn.Limits); v < w.min || v > w.max {
+				t.Fatalf("accepted %s = %d", w.key, v)
 			}
 		}
-		for _, p := range limitPairs {
-			lo, _ := limitByKey(p.lo)
-			hi, _ := limitByKey(p.hi)
-			if *lo.field(&l) > *hi.field(&l) {
-				t.Fatalf("accepted %s > %s", p.lo, p.hi)
+		for _, p := range wantPairs {
+			if wantLimitByKey(t, p[0]).get(tn.Limits) > wantLimitByKey(t, p[1]).get(tn.Limits) {
+				t.Fatalf("accepted %s > %s", p[0], p[1])
 			}
 		}
 		for _, c := range tn.Policy.DenyCommands {

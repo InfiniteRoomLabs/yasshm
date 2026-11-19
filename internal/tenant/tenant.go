@@ -121,7 +121,12 @@ func (l *AccessLevel) UnmarshalText(b []byte) error {
 // Permits reports whether a grant of level granted covers a tool that
 // requires level required. This is the only place in the module where access
 // levels are compared (spec 5.2): enabling a level later changes no caller.
+// It fails closed: a level outside none..full on either side permits
+// nothing.
 func Permits(granted, required AccessLevel) bool {
+	if granted > AccessFull || required > AccessFull {
+		return false
+	}
 	return required <= granted
 }
 
@@ -175,7 +180,9 @@ func (s *Server) IdentityFor(_ AccessLevel) Identity {
 // PrincipalMatch is one entry of a tenant's principals list: exactly one of
 // Email (a user) or CommonName (a service token's client id) is set.
 type PrincipalMatch struct {
-	// Email matches a user principal, compared without regard to case.
+	// Email matches a user principal. It is ASCII and compared without
+	// regard to ASCII case only: no Unicode folding, so a look-alike such as
+	// the Kelvin sign never matches "k".
 	Email string
 	// CommonName matches a service token principal, compared exactly.
 	CommonName string
@@ -186,12 +193,23 @@ type PrincipalMatch struct {
 func (m PrincipalMatch) Matches(kind PrincipalKind, subject string) bool {
 	switch kind {
 	case KindUser:
-		return m.Email != "" && strings.EqualFold(m.Email, subject)
+		return m.Email != "" && isASCII(m.Email) && isASCII(subject) && strings.EqualFold(m.Email, subject)
 	case KindService:
 		return m.CommonName != "" && m.CommonName == subject
 	default:
 		return false
 	}
+}
+
+// isASCII reports whether s holds only ASCII bytes. strings.EqualFold on
+// two ASCII strings folds ASCII letters only.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // Policy holds a tenant's operator additions to the built-in guard rails, as

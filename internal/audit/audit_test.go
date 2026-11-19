@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -76,7 +77,7 @@ func TestOpen(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := l.Write(GatewayStopped("test")); err != nil {
+		if err := l.Write(GatewayStopped(StopSignal)); err != nil {
 			t.Fatal(err)
 		}
 		_ = l.Close()
@@ -85,16 +86,73 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("log = %q", b)
 		}
 	})
-	// 0200 rather than 0400: a 0400 file is writable only for root, and CI
-	// does not run as root.
-	t.Run("edge/an existing owner-only 0200 log is accepted", func(t *testing.T) {
+	t.Run("edge/an existing empty log gets no newline", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "audit.jsonl")
-		writeMode(t, p, "", 0o200)
+		writeMode(t, p, "", 0o600)
 		l, err := Open(p)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = l.Close()
+		if b, _ := os.ReadFile(p); len(b) != 0 { //nolint:gosec // G304: test path from t.TempDir
+			t.Fatalf("log = %q", b)
+		}
+	})
+	t.Run("raging/a partial last line from a crash is ended before the next event", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "audit.jsonl")
+		partial := `{"ts":"2026-11-18T00:00:00Z","event":"command.requ`
+		writeMode(t, p, partial, 0o600)
+		l, err := Open(p, WithClock(clock))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Write(GatewayStarted("dev", "127.0.0.1:1")); err != nil {
+			t.Fatal(err)
+		}
+		_ = l.Close()
+		b, _ := os.ReadFile(p) //nolint:gosec // G304: test path from t.TempDir
+		lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+		if len(lines) != 2 || lines[0] != partial || !json.Valid([]byte(lines[1])) {
+			t.Fatalf("log = %q", b)
+		}
+	})
+	t.Run("edge/a log that ends in a newline gets no extra one", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "audit.jsonl")
+		writeMode(t, p, "{}\n", 0o600)
+		l, err := Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = l.Close()
+		if b, _ := os.ReadFile(p); string(b) != "{}\n" { //nolint:gosec // G304: test path from t.TempDir
+			t.Fatalf("log = %q", b)
+		}
+	})
+	t.Run("raging/a FIFO at the path is refused without blocking", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "audit.jsonl")
+		if err := syscall.Mkfifo(p, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { _, err := Open(p); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+				t.Fatalf("err = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Open blocked on a FIFO")
+		}
+	})
+	t.Run("sad/a log owned by another uid is refused", func(t *testing.T) {
+		orig := euid
+		t.Cleanup(func() { euid = orig })
+		euid = func() int { return os.Geteuid() + 1 }
+		p := filepath.Join(t.TempDir(), "audit.jsonl")
+		writeMode(t, p, "", 0o600)
+		if _, err := Open(p); err == nil || !strings.Contains(err.Error(), "is not owned by the gateway's uid") {
+			t.Fatalf("err = %v", err)
+		}
 	})
 	for _, mode := range []os.FileMode{0o640, 0o604, 0o620, 0o644, 0o666} {
 		t.Run("sad/refuses an existing log with mode "+mode.String(), func(t *testing.T) {
@@ -108,8 +166,8 @@ func TestOpen(t *testing.T) {
 	}
 	t.Run("sad/a directory in place of the log fails to open", func(t *testing.T) {
 		_, err := Open(t.TempDir())
-		if err == nil || !errors.Is(err, syscall.EISDIR) {
-			t.Fatalf("err = %v, want EISDIR", err)
+		if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("sad/a path under a regular file fails to open", func(t *testing.T) {
@@ -134,8 +192,8 @@ func TestOpen(t *testing.T) {
 	})
 	t.Run("raging/a character device is refused", func(t *testing.T) {
 		_, err := Open("/dev/null")
-		if err == nil {
-			t.Fatal("opened /dev/null as an audit log")
+		if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+			t.Fatalf("err = %v", err)
 		}
 	})
 }
@@ -210,12 +268,52 @@ func TestWrite(t *testing.T) {
 			}
 		}
 	})
+	t.Run("raging/shell operators are stored literally, not HTML-escaped", func(t *testing.T) {
+		l, p := openLog(t)
+		cmd := "a && b <c> | d > /tmp/x"
+		if err := l.Write(CommandRequested(actor, "lab-1", "c1", cmd, 60)); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(p) //nolint:gosec // G304: test path from t.TempDir
+		if !strings.Contains(string(b), `"command":"a && b <c> | d > /tmp/x"`) || strings.Count(string(b), "\n") != 1 {
+			t.Fatalf("log = %s", b)
+		}
+	})
+	t.Run("sad/an event without a name is refused", func(t *testing.T) {
+		ff := &fakeFile{}
+		if err := newLogger(ff).Write(Event{}); !errors.Is(err, ErrNoName) || ff.buf.Len() != 0 {
+			t.Fatalf("err = %v, wrote %q", err, ff.buf.String())
+		}
+	})
+	t.Run("corner/the lock holds one writer at a time", func(t *testing.T) {
+		ff := &fakeFile{slow: true}
+		l := newLogger(ff, WithClock(clock))
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 20 {
+					if err := l.Write(CommandStarted(actor, "lab-1", "c1")); err != nil {
+						t.Error(err)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		if ff.overlap.Load() {
+			t.Fatal("two writes or syncs ran at the same time")
+		}
+		if n := strings.Count(ff.buf.String(), "\n"); n != 320 {
+			t.Fatalf("got %d lines, want 320", n)
+		}
+	})
 	t.Run("sad/write after close", func(t *testing.T) {
 		l, _ := openLog(t)
 		if err := l.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.Write(GatewayStopped("x")); !errors.Is(err, ErrClosed) {
+		if err := l.Write(GatewayStopped(StopError)); !errors.Is(err, ErrClosed) {
 			t.Fatalf("err = %v", err)
 		}
 		if err := l.Close(); err != nil {
@@ -224,24 +322,44 @@ func TestWrite(t *testing.T) {
 	})
 }
 
-// fakeFile fails on demand.
+// fakeFile fails on demand and notices concurrent use.
 type fakeFile struct {
 	buf               bytes.Buffer
 	writeErr, syncErr error
+	failOnce          bool // the first write fails, later ones would succeed
 	short             bool
+	slow              bool // widen the window for an overlap
 	syncs             int
+	writes            int
+	busy, overlap     atomic.Bool
+}
+
+func (f *fakeFile) enter() func() {
+	if !f.busy.CompareAndSwap(false, true) {
+		f.overlap.Store(true)
+		return func() {}
+	}
+	if f.slow {
+		time.Sleep(50 * time.Microsecond)
+	}
+	return func() { f.busy.Store(false) }
 }
 
 func (f *fakeFile) Write(b []byte) (int, error) {
+	defer f.enter()()
+	f.writes++
 	if f.writeErr != nil {
 		return 0, f.writeErr
+	}
+	if f.failOnce && f.writes == 1 {
+		return 0, syscall.EIO
 	}
 	if f.short {
 		return len(b) - 1, nil
 	}
 	return f.buf.Write(b)
 }
-func (f *fakeFile) Sync() error  { f.syncs++; return f.syncErr }
+func (f *fakeFile) Sync() error  { defer f.enter()(); f.syncs++; return f.syncErr }
 func (f *fakeFile) Close() error { return nil }
 
 func TestAuditBeforeAct(t *testing.T) {
@@ -278,11 +396,20 @@ func TestAuditBeforeAct(t *testing.T) {
 		if ran {
 			t.Fatal("the guarded action ran although the audit write failed")
 		}
-		t.Run("corner/the logger stays failed", func(t *testing.T) {
-			if err := l.Before(ev, func() error { ran = true; return nil }); err == nil || ran {
-				t.Fatalf("second Before: err = %v, ran = %v", err, ran)
-			}
-		})
+	})
+	t.Run("corner/the logger stays failed after a write that would now succeed", func(t *testing.T) {
+		ff := &fakeFile{failOnce: true}
+		l := newLogger(ff, WithClock(clock))
+		ran := false
+		if err := l.Before(ev, func() error { ran = true; return nil }); err == nil || ran {
+			t.Fatalf("first Before: err = %v, ran = %v", err, ran)
+		}
+		if err := l.Before(ev, func() error { ran = true; return nil }); err == nil || ran {
+			t.Fatalf("second Before: err = %v, ran = %v", err, ran)
+		}
+		if ff.writes != 1 || ff.buf.Len() != 0 {
+			t.Fatalf("writes = %d, buffer %q: the logger wrote after a failure", ff.writes, ff.buf.String())
+		}
 	})
 	t.Run("sad/a log that cannot be opened blocks the action", func(t *testing.T) {
 		f := filepath.Join(t.TempDir(), "file")

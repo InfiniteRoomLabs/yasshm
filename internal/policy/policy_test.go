@@ -23,7 +23,7 @@ func twoTenants() []tenant.Tenant {
 		{
 			ID:      "alpha",
 			Servers: []tenant.Server{{Tenant: "alpha", ID: "lab-1", Host: "lab-1.example.net", Access: tenant.AccessLook}},
-			Policy:  tenant.Policy{DenyCommands: []string{`\bshred\b`}, DenyPaths: []string{"/srv/secret/*", "*.kdbx"}},
+			Policy:  tenant.Policy{DenyCommands: []string{`\bshred\b`}, DenyPaths: []string{"/srv/secret/*", "*.kdbx", "/srv/vault/**", "**/.tokens"}},
 			Limits:  limits,
 		},
 		{
@@ -85,6 +85,14 @@ func TestDecide(t *testing.T) {
 		{"sad/operator path rule with a slash", pa, aLab, downloadFile, Args{Path: "/srv/secret/db.txt"}, deny(CodePolicyDenied, "config:deny_paths[0]")},
 		{"sad/operator path rule on a base name", pa, aLab, downloadFile, Args{Path: "/home/u/vault.kdbx"}, deny(CodePolicyDenied, "config:deny_paths[1]")},
 		{"corner/operator path rule after cleaning", pa, aLab, downloadFile, Args{Path: "/srv/x/../secret/db.txt"}, deny(CodePolicyDenied, "config:deny_paths[0]")},
+		{"sad/operator subtree glob", pa, aLab, downloadFile, Args{Path: "/srv/vault/a/b"}, deny(CodePolicyDenied, "config:deny_paths[2]")},
+		{"sad/operator any-depth glob", pa, aLab, downloadFile, Args{Path: "/home/u/x/.tokens"}, deny(CodePolicyDenied, "config:deny_paths[3]")},
+		{"sad/zero-value tool is access_denied", pa, aLab, Tool{}, Args{}, deny(CodeAccessDenied, RuleAccessLevel)},
+		{"sad/a tool that requires none is access_denied", pa, aLab, Tool{Name: "x", Requires: tenant.AccessNone, Input: InputCommand}, Args{Command: "uptime"}, deny(CodeAccessDenied, RuleAccessLevel)},
+		{"raging/a tool with an undefined level is access_denied", pb, bLab, Tool{Name: "x", Requires: tenant.AccessLevel(9)}, Args{}, deny(CodeAccessDenied, RuleAccessLevel)},
+		{"raging/a server with an undefined grant is access_denied", pa, &tenant.Server{Tenant: "alpha", ID: "odd", Access: tenant.AccessLevel(9)}, uploadFile, Args{Path: "/tmp/x"}, deny(CodeAccessDenied, RuleAccessLevel)},
+		{"sad/principal without a kind is not_found", tenant.Principal{Tenant: "alpha"}, aLab, runCommand, Args{Command: "uptime"}, deny(CodeNotFound, RuleServerNotFound)},
+		{"corner/all-zero inputs are not_found", tenant.Principal{}, &tenant.Server{}, Tool{}, Args{}, deny(CodeNotFound, RuleServerNotFound)},
 		{"edge/command at the tenant's max_command_bytes", pa, aLab, runCommand, Args{Command: strings.Repeat("a", 64)}, allow},
 		{"edge/command one byte over the tenant's max_command_bytes", pa, aLab, runCommand, Args{Command: strings.Repeat("a", 65)}, deny(CodePolicyDenied, RuleCommandTooLong)},
 		{"raging/unknown tool input", pa, aLab, Tool{Name: "x", Requires: tenant.AccessLook, Input: Input(9)}, Args{}, deny(CodePolicyDenied, RuleUnknownInput)},
@@ -130,6 +138,11 @@ func TestNewEngine(t *testing.T) {
 		}, `tenant "alpha": deny_commands[1]`},
 		{"sad/operator glob is malformed", func(ts []tenant.Tenant) []tenant.Tenant {
 			ts[0].Policy.DenyPaths = []string{"/srv/[x"}
+			return ts
+		}, `tenant "alpha": deny_paths[0]: not a valid glob`},
+		{"sad/empty tenant id", func(ts []tenant.Tenant) []tenant.Tenant { ts[0].ID = ""; return ts }, "a tenant has an empty id"},
+		{"sad/operator glob with ** in the middle", func(ts []tenant.Tenant) []tenant.Tenant {
+			ts[0].Policy.DenyPaths = []string{"/srv/**/x"}
 			return ts
 		}, `tenant "alpha": deny_paths[0]: not a valid glob`},
 		{"edge/operator glob is empty", func(ts []tenant.Tenant) []tenant.Tenant {

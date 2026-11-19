@@ -11,8 +11,8 @@ import (
 // here or has an empty list.
 var pathCases = map[string]struct{ match, noMatch []string }{
 	"shadow": {
-		match:   []string{"/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-"},
-		noMatch: []string{"/etc/passwd", "/etc/group", "/etc/shadow.bak.d/x", "/home/u/etc/shadow"},
+		match:   []string{"/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-", "/var/backups/shadow.bak", "/var/backups/gshadow.bak"},
+		noMatch: []string{"/etc/passwd", "/etc/group", "/etc/shadow.bak.d/x", "/home/u/etc/shadow", "/var/backups/passwd.bak", "/var/backups/x/shadow.bak"},
 	},
 	"sudoers": {
 		match:   []string{"/etc/sudoers", "/etc/sudoers.d/90-cloud-init-users"},
@@ -27,24 +27,31 @@ var pathCases = map[string]struct{ match, noMatch []string }{
 		noMatch: []string{"/home/u/.ssh/id_ed25519.pub", "/home/u/.ssh/authorized_keys", "/home/u/.ssh/known_hosts", "/home/u/.ssh/config", "/srv/id_rsa_notes/readme"},
 	},
 	"key-file": {
-		match:   []string{"/etc/ssl/private/server.key", "/home/u/cert.p12", "/opt/app/keystore.jks", "/x/y.pfx", "/opt/app/app.keystore"},
-		noMatch: []string{"/etc/ssl/certs/ca.pem", "/etc/ssl/certs/server.crt", "/usr/share/keyrings/x.gpg", "/home/u/key.txt", "/home/u/monkey"},
+		match: []string{"/etc/ssl/private/server.key", "/home/u/cert.p12", "/opt/app/keystore.jks", "/x/y.pfx", "/opt/app/app.keystore",
+			"/etc/krb5.keytab", "/etc/letsencrypt/live/example.net/privkey.pem", "/etc/letsencrypt/archive/example.net/privkey1.pem"},
+		noMatch: []string{"/etc/ssl/certs/ca.pem", "/etc/ssl/certs/server.crt", "/usr/share/keyrings/x.gpg", "/home/u/key.txt", "/home/u/monkey",
+			"/etc/letsencrypt/live/example.net/fullchain.pem", "/etc/krb5.conf"},
 	},
 	"env-file": {
 		match:   []string{"/srv/app/.env", "/srv/app/.env.production"},
 		noMatch: []string{"/srv/app/.envrc", "/srv/app/env.example", "/etc/environment", "/srv/app/.environment"},
 	},
 	"credential-file": {
-		match:   []string{"/home/u/.netrc", "/root/.pgpass", "/home/u/.git-credentials", "/root/.my.cnf", "/srv/app/credentials.json"},
-		noMatch: []string{"/home/u/.gitconfig", "/etc/mysql/my.cnf", "/srv/app/credentials.md", "/srv/netrc"},
+		match:   []string{"/home/u/.netrc", "/root/.pgpass", "/home/u/.git-credentials", "/root/.my.cnf", "/srv/app/credentials.json", "/home/u/.docker/config.json", "/root/.docker/config.json"},
+		noMatch: []string{"/home/u/.gitconfig", "/etc/mysql/my.cnf", "/srv/app/credentials.md", "/srv/netrc", "/srv/app/config.json", "/home/u/.docker/daemon.json"},
 	},
 	"cloud-credentials": {
-		match:   []string{"/root/.aws/credentials", "/home/u/.aws/credentials", "/home/u/.config/gcloud/access_tokens.db", "/root/.kube/config", "/home/u/.kube/config"},
-		noMatch: []string{"/home/u/.aws/config", "/home/u/.config/other/x", "/home/u/.kube/cache/x", "/home/u/sub/.aws/credentials"},
+		match: []string{"/root/.aws/credentials", "/home/u/.aws/credentials", "/home/u/.config/gcloud/access_tokens.db", "/root/.kube/config", "/home/u/.kube/config",
+			"/home/u/sub/.aws/credentials", "/var/lib/svc/.aws/credentials", "/root/.config/gcloud/legacy_credentials/x/adc.json", "/srv/u/.kube/config"},
+		noMatch: []string{"/home/u/.aws/config", "/home/u/.config/other/x", "/home/u/.kube/cache/x", "/home/u/aws/credentials", "/home/u/.kube/config.d/x"},
 	},
 	"proc-secrets": {
 		match:   []string{"/proc/1/environ", "/proc/self/environ", "/proc/42/mem", "/proc/42/task/43/environ", "/proc/kcore"},
 		noMatch: []string{"/proc/cpuinfo", "/proc/1/status", "/proc/self/cmdline", "/proc/meminfo"},
+	},
+	"proc-links": {
+		match:   []string{"/proc/self/root/etc/shadow", "/proc/1/root", "/proc/42/cwd/notes.txt", "/proc/42/task/43/root/etc/passwd", "/proc/self/cwd/x"},
+		noMatch: []string{"/proc/self/status", "/proc/rootfs", "/proc/1/rooted/x", "/srv/proc/1/root/x"},
 	},
 }
 
@@ -94,6 +101,44 @@ func TestPathRuleCases(t *testing.T) {
 
 func checkPathBuiltin(p string) Decision {
 	return (&tenantRules{maxCommandBytes: 1}).checkPath(p)
+}
+
+func TestGlobForms(t *testing.T) {
+	tests := []struct {
+		name, glob, path string
+		want             bool
+	}{
+		{"happy/subtree matches the directory itself", "/srv/secret/**", "/srv/secret", true},
+		{"happy/subtree matches below", "/srv/secret/**", "/srv/secret/a/b/c", true},
+		{"sad/subtree does not match a sibling", "/srv/secret/**", "/srv/secretx/a", false},
+		{"sad/subtree does not match the parent", "/srv/secret/**", "/srv", false},
+		{"happy/any depth at the root", "**/.aws/credentials", "/.aws/credentials", true},
+		{"happy/any depth deep", "**/.aws/credentials", "/a/b/c/.aws/credentials", true},
+		{"sad/any depth needs the whole tail", "**/.aws/credentials", "/a/.aws/credentials/x", false},
+		{"corner/any depth and subtree", "**/.config/gcloud/**", "/x/.config/gcloud/y/z", true},
+		{"corner/any depth and subtree on the directory", "**/.config/gcloud/**", "/x/.config/gcloud", true},
+		{"sad/any depth and subtree elsewhere", "**/.config/gcloud/**", "/x/.config/other", false},
+		{"edge/root path against an absolute glob", "/", "/", true},
+		{"edge/root path against a subtree", "/srv/**", "/", false},
+		{"edge/base name glob", "*.kdbx", "/a/b.kdbx", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !validGlob(tt.glob) {
+				t.Fatalf("validGlob(%q) = false", tt.glob)
+			}
+			if got := globMatch(tt.glob, tt.path); got != tt.want {
+				t.Fatalf("globMatch(%q, %q) = %v, want %v", tt.glob, tt.path, got, tt.want)
+			}
+		})
+	}
+	for _, bad := range []string{"", "srv/x", "/srv/**/x", "/srv/a**", "**", "/srv/[x", "x/**"} {
+		t.Run("sad/invalid glob "+bad, func(t *testing.T) {
+			if validGlob(bad) {
+				t.Fatalf("validGlob(%q) = true", bad)
+			}
+		})
+	}
 }
 
 func TestPathGuardRails(t *testing.T) {

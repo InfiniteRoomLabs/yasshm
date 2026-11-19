@@ -1,11 +1,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"path"
 	"regexp"
+	"regexp/syntax"
 	"strconv"
 	"strings"
 	"unicode"
@@ -36,27 +38,24 @@ func isHost(s string) bool {
 }
 
 func hasControl(s string) bool {
-	for _, r := range s {
-		if unicode.IsControl(r) {
-			return true
-		}
-	}
-	return false
+	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // checkToken checks an opaque identifier: 1 to max bytes, no white space and
 // no control characters.
 func checkToken(s string, maxLen int) string {
-	if s == "" || len(s) > maxLen || hasControl(s) || strings.IndexFunc(s, unicode.IsSpace) >= 0 {
+	if s == "" || len(s) > maxLen || hasControl(s) || strings.ContainsFunc(s, unicode.IsSpace) {
 		return fmt.Sprintf("must be 1 to %d characters without spaces or control characters", maxLen)
 	}
 	return ""
 }
 
-// isEmail is a deliberately plain check: one @, a local part without spaces
-// or control characters, and a DNS host name after it.
+// isEmail is a deliberately plain check: ASCII only, one @, a local part
+// without spaces or control characters, and a DNS host name after it. ASCII
+// keeps matching to ASCII case folding (tenant.PrincipalMatch).
 func isEmail(s string) bool {
-	if len(s) > 254 || hasControl(s) || strings.IndexFunc(s, unicode.IsSpace) >= 0 {
+	if len(s) > 254 || hasControl(s) || strings.ContainsFunc(s, unicode.IsSpace) ||
+		strings.ContainsFunc(s, func(r rune) bool { return r > unicode.MaxASCII }) {
 		return false
 	}
 	local, domain, ok := strings.Cut(s, "@")
@@ -151,7 +150,11 @@ func checkCommandPattern(p string) string {
 	}
 	re, err := regexp.Compile(p)
 	if err != nil {
-		return "does not compile as an RE2 expression: " + strings.TrimPrefix(err.Error(), "error parsing regexp: ")
+		var se *syntax.Error
+		if errors.As(err, &se) {
+			return fmt.Sprintf("does not compile as an RE2 expression: %s in %q", se.Code, se.Expr)
+		}
+		return fmt.Sprintf("does not compile as an RE2 expression: %q", p)
 	}
 	if re.MatchString("") {
 		return "matches the empty string, so it would deny every command"
@@ -159,18 +162,30 @@ func checkCommandPattern(p string) string {
 	return ""
 }
 
-// checkPathGlob checks an operator deny_paths entry. A glob with a slash must
-// be absolute (it is matched against the whole cleaned path); a glob without
-// one is matched against the base name. The policy package does the matching.
+// checkPathGlob checks an operator deny_paths entry. A glob without a slash
+// is matched against the base name. A glob with a slash is matched against
+// the whole cleaned path and must start with "/" or "**/". "**" is allowed
+// only as the whole first element (any depth before the rest) or the whole
+// last element (the directory and everything under it). The policy package
+// does the matching; its NewEngine applies the same rules.
 func checkPathGlob(g string) string {
 	if g == "" || len(g) > maxPattern {
 		return fmt.Sprintf("must be 1 to %d bytes", maxPattern)
 	}
-	if strings.Contains(g, "/") && !strings.HasPrefix(g, "/") {
-		return "a glob with a slash must be absolute"
+	if strings.Contains(g, "/") && !strings.HasPrefix(g, "/") && !strings.HasPrefix(g, "**/") {
+		return "a glob with a slash must start with / or **/"
 	}
-	if _, err := path.Match(g, ""); err != nil {
-		return "is not a valid glob"
+	elems := strings.Split(g, "/")
+	for i, e := range elems {
+		if e == "**" && (i == 0 || i == len(elems)-1) && len(elems) > 1 {
+			continue
+		}
+		if strings.Contains(e, "**") {
+			return "** is allowed only as the whole first or last path element"
+		}
+		if _, err := path.Match(e, ""); err != nil {
+			return "is not a valid glob"
+		}
 	}
 	return ""
 }

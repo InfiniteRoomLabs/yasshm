@@ -24,7 +24,9 @@ while IFS=: read -r file decl; do
   name="${name%(}"
   pkg="./$(dirname "$file")"
   echo "fuzz: $name in $pkg for $fuzztime"
-  mise exec -- go test -run '^$' -fuzz "^${name}\$" -fuzztime "$fuzztime" "$pkg"
+  # -fuzzminimizetime 1s: with the default (60s per input) the workers spent
+  # most of the 30 seconds minimizing new inputs and stopped executing (Phase 1 QA).
+  mise exec -- go test -run '^$' -fuzz "^${name}\$" -fuzztime "$fuzztime" -fuzzminimizetime 1s "$pkg"
   count=$((count + 1))
 done <<<"$targets"
 

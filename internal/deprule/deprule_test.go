@@ -17,10 +17,11 @@ const module = "github.com/InfiniteRoomLabs/yasshm"
 // its non-test files may import (spec section 4). A package missing from this
 // map may import anything; add it here when its phase builds it.
 var allowed = map[string][]string{
-	"tenant": {},
-	"config": {"internal/tenant"},
-	"policy": {"internal/tenant"},
-	"audit":  {"internal/tenant"},
+	"tenant":  {},
+	"keyfile": {},
+	"config":  {"internal/tenant", "internal/keyfile"},
+	"policy":  {"internal/tenant"},
+	"audit":   {"internal/tenant"},
 }
 
 // testAllowed is added to allowed for _test.go files: test support only.
@@ -117,4 +118,74 @@ func TestDependencyRule(t *testing.T) {
 			t.Fatal("a testkit subpackage did not match")
 		}
 	})
+}
+
+// TestTestkitOnlyFromTests walks every Go file of the module under cmd/,
+// internal/ and test/ and fails when a file that is not a _test.go file, and
+// not itself inside internal/testkit, imports internal/testkit (spec
+// section 4: test support is imported only by tests).
+func TestTestkitOnlyFromTests(t *testing.T) {
+	root := filepath.Join("..", "..")
+	checked := 0
+	for _, top := range []string{"cmd", "internal", "test"} {
+		dir := filepath.Join(root, top)
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if strings.HasPrefix(filepath.ToSlash(rel), "internal/testkit/") {
+				return nil
+			}
+			checked++
+			for _, imp := range fileImports(t, path) {
+				if imp == module+"/internal/testkit" || strings.HasPrefix(imp, module+"/internal/testkit/") {
+					t.Errorf("%s imports %s; test support is for _test.go files only", rel, imp)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("happy/the walk saw the module", func(t *testing.T) {
+		if checked < 10 {
+			t.Fatalf("only %d files checked", checked)
+		}
+	})
+	t.Run("sad/a production file importing testkit is flagged", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "x.go")
+		if err := os.WriteFile(p, []byte("package x\n\nimport _ \""+module+"/internal/testkit/configtest\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		imps := fileImports(t, p)
+		if len(imps) != 1 || !strings.HasPrefix(imps[0], module+"/internal/testkit/") {
+			t.Fatalf("imports = %v", imps)
+		}
+	})
+}
+
+func fileImports(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, 0, len(f.Imports))
+	for _, imp := range f.Imports {
+		p, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, p)
+	}
+	return out
 }

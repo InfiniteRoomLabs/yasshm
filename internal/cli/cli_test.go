@@ -14,18 +14,62 @@ type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
+// runCase is one call of Run and what it must print and return.
+type runCase struct {
+	name       string
+	args       []string
+	wantCode   int
+	wantOut    []string
+	wantErr    []string
+	wantNoOut  bool
+	wantNoErr  bool
+	maxErr     int // 0 means 2000 bytes
+	failStdout bool
+}
+
+func runCases(t *testing.T, tests []runCase) {
+	t.Helper()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			var code int
+			if tt.failStdout {
+				code = Run(tt.args, failWriter{}, &errb)
+			} else {
+				code = Run(tt.args, &out, &errb)
+			}
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", code, tt.wantCode, errb.String())
+			}
+			for _, s := range tt.wantOut {
+				if !strings.Contains(out.String(), s) {
+					t.Errorf("stdout %q missing %q", out.String(), s)
+				}
+			}
+			for _, s := range tt.wantErr {
+				if !strings.Contains(errb.String(), s) {
+					t.Errorf("stderr %q missing %q", errb.String(), s)
+				}
+			}
+			if tt.wantNoErr && errb.Len() != 0 {
+				t.Errorf("unexpected stderr %q", errb.String())
+			}
+			if tt.wantNoOut && out.Len() != 0 {
+				t.Errorf("unexpected stdout %q", out.String())
+			}
+			maxErr := tt.maxErr
+			if maxErr == 0 {
+				maxErr = 2000
+			}
+			if errb.Len() > maxErr {
+				t.Errorf("stderr is %d bytes, want at most %d", errb.Len(), maxErr)
+			}
+		})
+	}
+}
+
 func TestRun(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		wantCode   int
-		wantOut    []string
-		wantErr    []string
-		wantNoOut  bool
-		wantNoErr  bool
-		maxErr     int
-		failStdout bool
-	}{
+	runCases(t, []runCase{
 		{name: "happy/version", args: []string{"version"}, wantCode: 0, wantNoErr: true,
 			wantOut: []string{"yasshm " + Version, "commit " + Commit, "built " + Date}},
 		{name: "sad/no command", args: nil, wantCode: 2, wantNoOut: true,
@@ -51,40 +95,7 @@ func TestRun(t *testing.T) {
 			wantErr: []string{"unknown command", `\x00\n`, "usage: yasshm"}, maxErr: 1000},
 		{name: "corner/many arguments after unknown command", args: append([]string{"nope"}, make([]string, 1000)...),
 			wantCode: 2, wantNoOut: true, wantErr: []string{`unknown command "nope"`}, maxErr: 1000},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var out, errb bytes.Buffer
-			var code int
-			if tt.failStdout {
-				code = Run(tt.args, failWriter{}, &errb)
-			} else {
-				code = Run(tt.args, &out, &errb)
-			}
-			if code != tt.wantCode {
-				t.Fatalf("exit code = %d, want %d", code, tt.wantCode)
-			}
-			for _, s := range tt.wantOut {
-				if !strings.Contains(out.String(), s) {
-					t.Errorf("stdout %q missing %q", out.String(), s)
-				}
-			}
-			for _, s := range tt.wantErr {
-				if !strings.Contains(errb.String(), s) {
-					t.Errorf("stderr %q missing %q", errb.String(), s)
-				}
-			}
-			if tt.wantNoErr && errb.Len() != 0 {
-				t.Errorf("unexpected stderr %q", errb.String())
-			}
-			if tt.maxErr > 0 && errb.Len() > tt.maxErr {
-				t.Errorf("stderr is %d bytes, want at most %d", errb.Len(), tt.maxErr)
-			}
-			if tt.wantNoOut && out.Len() != 0 {
-				t.Errorf("unexpected stdout %q", out.String())
-			}
-		})
-	}
+	})
 }
 
 func TestConfigCheck(t *testing.T) {
@@ -92,15 +103,7 @@ func TestConfigCheck(t *testing.T) {
 	valid := files.Config
 	invalid := files.Rewrite(t, "version: 1", "version: 2")
 	invalid = configtest.Files{Config: invalid}.Rewrite(t, "access: look}\n", "access: full}\n")
-	tests := []struct {
-		name      string
-		args      []string
-		wantCode  int
-		wantOut   []string
-		wantErr   []string
-		wantNoOut bool
-		wantNoErr bool
-	}{
+	runCases(t, []runCase{
 		{name: "happy/valid file", args: []string{"config", "check", "--config", valid}, wantCode: 0, wantNoErr: true,
 			wantOut: []string{"config ok: 1 tenant, 2 servers\n"}},
 		{name: "happy/valid file with an equals sign", args: []string{"config", "check", "--config=" + valid}, wantCode: 0, wantNoErr: true,
@@ -131,35 +134,11 @@ func TestConfigCheck(t *testing.T) {
 			wantErr: []string{"flag provided but not defined", "..."}},
 		{name: "edge/top-level usage mentions config check", args: []string{"help"}, wantCode: 0, wantNoErr: true,
 			wantOut: []string{"config check --config <file>"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var out, errb bytes.Buffer
-			code := Run(tt.args, &out, &errb)
-			if code != tt.wantCode {
-				t.Fatalf("exit code = %d, want %d (stderr %q)", code, tt.wantCode, errb.String())
-			}
-			for _, s := range tt.wantOut {
-				if !strings.Contains(out.String(), s) {
-					t.Errorf("stdout %q missing %q", out.String(), s)
-				}
-			}
-			for _, s := range tt.wantErr {
-				if !strings.Contains(errb.String(), s) {
-					t.Errorf("stderr %q missing %q", errb.String(), s)
-				}
-			}
-			if tt.wantNoErr && errb.Len() != 0 {
-				t.Errorf("unexpected stderr %q", errb.String())
-			}
-			if tt.wantNoOut && out.Len() != 0 {
-				t.Errorf("unexpected stdout %q", out.String())
-			}
-			if errb.Len() > 2000 {
-				t.Errorf("stderr is %d bytes", errb.Len())
-			}
-		})
-	}
+		{name: "sad/stdout write fails", args: []string{"config", "check", "--config", valid}, wantCode: 1, failStdout: true,
+			wantErr: []string{"write failed"}},
+		{name: "sad/help write fails", args: []string{"config", "check", "-h"}, wantCode: 1, failStdout: true,
+			wantErr: []string{"write failed"}},
+	})
 	t.Run("corner/success names no host, user, key path, audience or team domain", func(t *testing.T) {
 		var out, errb bytes.Buffer
 		if code := Run([]string{"config", "check", "--config", valid}, &out, &errb); code != 0 {
@@ -169,18 +148,6 @@ func TestConfigCheck(t *testing.T) {
 			if strings.Contains(out.String(), secretish) {
 				t.Fatalf("stdout %q names %q", out.String(), secretish)
 			}
-		}
-	})
-	t.Run("sad/stdout write fails", func(t *testing.T) {
-		var errb bytes.Buffer
-		if code := Run([]string{"config", "check", "--config", valid}, failWriter{}, &errb); code != 1 || !strings.Contains(errb.String(), "write failed") {
-			t.Fatalf("code %d, stderr %q", code, errb.String())
-		}
-	})
-	t.Run("sad/help write fails", func(t *testing.T) {
-		var errb bytes.Buffer
-		if code := Run([]string{"config", "check", "-h"}, failWriter{}, &errb); code != 1 {
-			t.Fatalf("code %d", code)
 		}
 	})
 	t.Run("edge/plural", func(t *testing.T) {

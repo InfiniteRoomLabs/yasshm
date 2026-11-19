@@ -42,8 +42,9 @@ var limitTable = []limitSpec{
 	{"retention_days", 7, 1, 3650, func(l *tenant.Limits) *int64 { return &l.RetentionDays }},
 	{"max_data_bytes", 1 * gib, 1 * mib, 1024 * gib, func(l *tenant.Limits) *int64 { return &l.MaxDataBytes }},
 	// The request body is capped at 2 MiB (spec 5.8) and base64 grows data by
-	// a third, so 1.5 MiB is the most that can arrive in one call.
-	{"max_upload_bytes", 1 * mib, 1, 1536 * kib, func(l *tenant.Limits) *int64 { return &l.MaxUploadBytes }},
+	// a third: 1.5 MiB would be exactly 2 MiB encoded, with no room for the
+	// JSON around it, so 1 MiB is the most that fits.
+	{"max_upload_bytes", 1 * mib, 1, 1 * mib, func(l *tenant.Limits) *int64 { return &l.MaxUploadBytes }},
 	{"kill_grace_seconds", 5, 1, 60, func(l *tenant.Limits) *int64 { return &l.KillGraceSeconds }},
 	{"connect_timeout_seconds", 10, 1, 120, func(l *tenant.Limits) *int64 { return &l.ConnectTimeoutSeconds }},
 	{"shutdown_grace_seconds", 20, 1, 300, func(l *tenant.Limits) *int64 { return &l.ShutdownGraceSeconds }},
@@ -70,11 +71,11 @@ var limitPairs = []limitPair{
 	{"max_output_bytes", "max_data_bytes"},
 }
 
-func limitByKey(key string) (limitSpec, bool) {
+func limitByKey(key string) limitSpec {
 	for _, s := range limitTable {
 		if s.key == key {
-			return s, true
+			return s
 		}
 	}
-	return limitSpec{}, false
+	panic("config: no limit named " + key)
 }

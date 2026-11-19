@@ -118,6 +118,8 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - The sandbox runs tests as root (a CI runner does not), so a 0400 file is still writable and readable there. Write tests that hold for both: make a write fail with `/dev/full` (ENOSPC) and an open fail with a path under a regular file or a directory in place of the file; check key permissions on mode bits.
 - `go.yaml.in/yaml/v3` skips its duplicate-key check when decoding into a `yaml.Node`, and reports lines, not key paths. `internal/config` walks the node tree itself for both; do not switch it to `Decode` into structs.
 - A new built-in denylist entry in `internal/policy` needs must-match and must-not-match cases in `commandCases` or `pathCases`; the table test fails without them.
+- `TestParseLimits` holds its own literal copy of the limits table and the four cross-field pairs: changing a default, a bound or a pair means changing `limits.go`, the test and the spec 5.1 callout together.
+- The command rails are regular expressions that skip quoted text, not a shell parser; an accepted bypass goes into the list in the `policy` package doc and the spec 5.3 callout, not into a cleverer regex.
 - The template-placeholder check must keep printing nothing: `grep -rEn '<(project|one-line-description|toolchain|gate-steps|repo|slug)>' --exclude-dir=.git .`. Write per-phase slots as `<n>` and `<name>`, never with one of those six words.
 
 ## If you break something

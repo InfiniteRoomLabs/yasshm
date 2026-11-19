@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -32,6 +33,9 @@ type decoder struct {
 }
 
 func (d *decoder) add(path string, n *yaml.Node, format string, args ...any) {
+	if path == "" {
+		path = "config"
+	}
 	line := 0
 	if n != nil {
 		line = n.Line
@@ -171,20 +175,27 @@ func (d *decoder) mapping(path string, n *yaml.Node, keys ...string) *fields {
 	}
 	f := &fields{d: d, path: path, node: n, vals: map[string]*yaml.Node{}}
 	for _, e := range es {
-		known := false
-		for _, k := range keys {
-			if e.key == k {
-				known = true
-				break
-			}
-		}
-		if !known {
+		if !slices.Contains(keys, e.key) {
 			d.add(join(path, e.key), e.knode, "unknown key")
 			continue
 		}
 		f.vals[e.key] = e.val
 	}
 	return f
+}
+
+// item decodes a required mapping that is an item of a list or of an id-keyed
+// mapping: anchors and aliases are reported, and null is "expected a
+// mapping, got null". It returns nil when n is not a usable mapping.
+func (d *decoder) item(path string, n *yaml.Node, keys ...string) *fields {
+	if !d.usable(path, n) {
+		return nil
+	}
+	if isNull(n) {
+		d.add(path, n, "expected a mapping, got null")
+		return nil
+	}
+	return d.mapping(path, n, keys...)
 }
 
 // get returns the value of key, or nil when it is absent or null; a missing
@@ -218,6 +229,17 @@ func (f *fields) str(key string, required bool) (string, bool) {
 		return "", false
 	}
 	return f.d.scalarString(join(f.path, key), v)
+}
+
+// nonEmpty is a required string that must not be empty: null, absent and ""
+// are all "is required".
+func (f *fields) nonEmpty(key string) (string, bool) {
+	s, ok := f.str(key, true)
+	if ok && s == "" {
+		f.d.add(join(f.path, key), f.vals[key], "is required")
+		return "", false
+	}
+	return s, ok
 }
 
 func (d *decoder) scalarString(path string, v *yaml.Node) (string, bool) {
@@ -487,14 +509,7 @@ func (d *decoder) id(f *fields, what string) (string, bool) {
 
 func (d *decoder) tenant(p string, n *yaml.Node, refs *fileRefs) (tenant.Tenant, bool) {
 	var t tenant.Tenant
-	if !d.usable(p, n) {
-		return t, false
-	}
-	if isNull(n) {
-		d.add(p, n, "expected a mapping, got null")
-		return t, false
-	}
-	f := d.mapping(p, n, "id", "principals", "identities", "servers", "policy", "limits")
+	f := d.item(p, n, "id", "principals", "identities", "servers", "policy", "limits")
 	if f == nil {
 		return t, false
 	}
@@ -512,21 +527,13 @@ func (d *decoder) principals(tf *fields) []tenant.PrincipalMatch {
 	var out []tenant.PrincipalMatch
 	base := join(tf.path, "principals")
 	seen := map[string]string{}
-	for i, n := range tf.seq("principals", true) {
+	items := tf.seq("principals", true)
+	for i, n := range items {
 		p := fmt.Sprintf("%s[%d]", base, i)
-		if !d.usable(p, n) {
-			continue
-		}
-		if isNull(n) {
-			d.add(p, n, "expected a mapping, got null")
-			continue
-		}
-		f := d.mapping(p, n, "email", "common_name")
+		f := d.item(p, n, "email", "common_name")
 		if f == nil {
 			continue
 		}
-		email, hasEmail := f.str("email", false)
-		cn, hasCN := f.str("common_name", false)
 		_, emailPresent := f.vals["email"]
 		_, cnPresent := f.vals["common_name"]
 		if emailPresent == cnPresent {
@@ -535,21 +542,26 @@ func (d *decoder) principals(tf *fields) []tenant.PrincipalMatch {
 		}
 		var m tenant.PrincipalMatch
 		var key string
-		switch {
-		case hasEmail:
+		if emailPresent {
+			email, ok := f.nonEmpty("email")
+			if !ok {
+				continue
+			}
 			if !isEmail(email) {
-				d.add(p+".email", f.vals["email"], "must be an email address")
+				d.add(p+".email", f.vals["email"], "must be an ASCII email address")
 				continue
 			}
 			m.Email, key = email, "email:"+strings.ToLower(email)
-		case hasCN:
+		} else {
+			cn, ok := f.nonEmpty("common_name")
+			if !ok {
+				continue
+			}
 			if msg := checkToken(cn, 256); msg != "" {
 				d.add(p+".common_name", f.vals["common_name"], "%s", msg)
 				continue
 			}
 			m.CommonName, key = cn, "cn:"+cn
-		default:
-			continue
 		}
 		if prev, dup := seen[key]; dup {
 			d.add(p, n, "duplicate principal (also %s)", prev)
@@ -557,6 +569,11 @@ func (d *decoder) principals(tf *fields) []tenant.PrincipalMatch {
 		}
 		seen[key] = p
 		out = append(out, m)
+	}
+	// A tenant nobody can map to is an error even when each dropped entry
+	// was reported on its own.
+	if len(items) > 0 && len(out) == 0 {
+		d.add(base, tf.vals["principals"], "must hold at least one valid principal")
 	}
 	return out
 }
@@ -583,11 +600,7 @@ func (d *decoder) identities(tf *fields, refs *fileRefs) map[tenant.IdentityID]t
 			d.add(p, e.knode, "identity id must match %s", idPattern)
 			continue
 		}
-		if isNull(e.val) {
-			d.add(p, e.val, "expected a mapping, got null")
-			continue
-		}
-		f := d.mapping(p, e.val, "user", "private_key_file")
+		f := d.item(p, e.val, "user", "private_key_file")
 		if f == nil {
 			continue
 		}
@@ -619,14 +632,7 @@ func (d *decoder) servers(tf *fields, tid tenant.TenantID, ids map[tenant.Identi
 	seen := map[string]int{}
 	for i, n := range tf.seq("servers", true) {
 		p := itemPath(base, i, n)
-		if !d.usable(p, n) {
-			continue
-		}
-		if isNull(n) {
-			d.add(p, n, "expected a mapping, got null")
-			continue
-		}
-		f := d.mapping(p, n, "id", "description", "host", "port", "identity", "host_key", "known_hosts_file", "access", "tags")
+		f := d.item(p, n, "id", "description", "host", "port", "identity", "host_key", "known_hosts_file", "access", "tags")
 		if f == nil {
 			continue
 		}
@@ -738,6 +744,8 @@ func (d *decoder) policy(tf *fields) tenant.Policy {
 	if f == nil {
 		return pol
 	}
+	d.capList(f, "deny_commands")
+	d.capList(f, "deny_paths")
 	cmds, paths, nodes := f.strings("deny_commands")
 	for i, c := range cmds {
 		if msg := checkCommandPattern(c); msg != "" {
@@ -755,6 +763,15 @@ func (d *decoder) policy(tf *fields) tenant.Policy {
 		pol.DenyPaths = append(pol.DenyPaths, g)
 	}
 	return pol
+}
+
+// maxPatterns bounds how many entries an operator deny list may hold.
+const maxPatterns = 256
+
+func (d *decoder) capList(f *fields, key string) {
+	if v := f.vals[key]; v != nil && v.Kind == yaml.SequenceNode && len(v.Content) > maxPatterns {
+		d.add(join(f.path, key), v, "at most %d entries, got %d", maxPatterns, len(v.Content))
+	}
 }
 
 func (d *decoder) limits(tf *fields) tenant.Limits {
@@ -789,8 +806,7 @@ func (d *decoder) limits(tf *fields) tenant.Limits {
 		if !valid[pr.lo] || !valid[pr.hi] {
 			continue
 		}
-		lo, _ := limitByKey(pr.lo)
-		hi, _ := limitByKey(pr.hi)
+		lo, hi := limitByKey(pr.lo), limitByKey(pr.hi)
 		if *lo.field(&l) > *hi.field(&l) {
 			d.add(join(base, pr.lo), f.lineNode(pr.lo), "must not exceed %s (%d > %d)", pr.hi, *lo.field(&l), *hi.field(&l))
 		}

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/InfiniteRoomLabs/yasshm/internal/keyfile"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 )
 
@@ -188,12 +191,20 @@ func TestParseTenantRules(t *testing.T) {
 		{"sad/principal with neither form", "- email: operator@example.net", "- {}", "tenants[0](default).principals[0]: needs exactly one of email or common_name"},
 		{"sad/principal is null", "- email: operator@example.net", "- ~", "tenants[0](default).principals[0]: expected a mapping, got null"},
 		{"sad/principal with an unknown key", "- email: operator@example.net", "- {email: operator@example.net, group: x}", "tenants[0](default).principals[0].group: unknown key"},
-		{"sad/bad email", "- email: operator@example.net", "- email: operator", "tenants[0](default).principals[0].email: must be an email address"},
-		{"sad/email with two at signs", "- email: operator@example.net", "- email: a@b@example.net", "tenants[0](default).principals[0].email: must be an email address"},
-		{"sad/email with a space", "- email: operator@example.net", "- email: 'op erator@example.net'", "tenants[0](default).principals[0].email: must be an email address"},
+		{"sad/bad email", "- email: operator@example.net", "- email: operator", "tenants[0](default).principals[0].email: must be an ASCII email address"},
+		{"sad/email with two at signs", "- email: operator@example.net", "- email: a@b@example.net", "tenants[0](default).principals[0].email: must be an ASCII email address"},
+		{"sad/email with a space", "- email: operator@example.net", "- email: 'op erator@example.net'", "tenants[0](default).principals[0].email: must be an ASCII email address"},
 		{"sad/common_name with a space", "- email: operator@example.net", "- common_name: 'a b'", "tenants[0](default).principals[0].common_name: must be 1 to 256 characters"},
 		{"sad/duplicate email ignoring case", "- email: operator@example.net", "- email: operator@example.net\n      - email: Operator@Example.NET", "tenants[0](default).principals[1]: duplicate principal (also tenants[0](default).principals[0])"},
 		{"sad/duplicate common_name", "- email: operator@example.net", "- common_name: x\n      - common_name: x", "tenants[0](default).principals[1]: duplicate principal"},
+		{"sad/email is null", "- email: operator@example.net", "- email: ~", "tenants[0](default).principals[0].email: is required"},
+		{"sad/email left blank", "- email: operator@example.net", "- email:", "tenants[0](default).principals[0].email: is required"},
+		{"sad/email is empty", "- email: operator@example.net", "- email: ''", "tenants[0](default).principals[0].email: is required"},
+		{"sad/common_name is null", "- email: operator@example.net", "- common_name: ~", "tenants[0](default).principals[0].common_name: is required"},
+		{"corner/a null email beside a valid one is still reported", "- email: operator@example.net", "- email: ~\n      - email: operator@example.net", "tenants[0](default).principals[0].email: is required"},
+		{"corner/a list of only bad principals leaves the tenant without one", "- email: operator@example.net", "- email: ~", "tenants[0](default).principals: must hold at least one valid principal"},
+		{"raging/non-ASCII email", "- email: operator@example.net", "- email: \"op\u00e9rator@example.net\"", "tenants[0](default).principals[0].email: must be an ASCII email address"},
+		{"raging/Kelvin sign in an email", "- email: operator@example.net", "- email: \"\u212aelvin@example.net\"", "tenants[0](default).principals[0].email: must be an ASCII email address"},
 	})
 }
 
@@ -267,6 +278,14 @@ func TestParseServerRules(t *testing.T) {
 	})
 }
 
+func repeatList(item string, n int) string {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = item
+	}
+	return strings.Join(items, ", ")
+}
+
 func tagList(n int) string {
 	tags := make([]string, n)
 	for i := range tags {
@@ -289,95 +308,173 @@ func TestParsePolicyRules(t *testing.T) {
 		{"raging/deny_commands entry too long", "deny_commands: []", "deny_commands: ['" + strings.Repeat("a", 1025) + "']", "tenants[0](default).policy.deny_commands[0]: must be 1 to 1024 bytes"},
 		{"sad/deny_commands entry is a number", "deny_commands: []", "deny_commands: [5]", "tenants[0](default).policy.deny_commands[0]: expected a string, got an integer"},
 		{"sad/deny_paths bad glob", "deny_paths: []", `deny_paths: ['/srv/[x']`, "tenants[0](default).policy.deny_paths[0]: is not a valid glob"},
-		{"sad/deny_paths relative with a slash", "deny_paths: []", `deny_paths: ['srv/secrets']`, "tenants[0](default).policy.deny_paths[0]: a glob with a slash must be absolute"},
+		{"sad/deny_paths relative with a slash", "deny_paths: []", `deny_paths: ['srv/secrets']`, "tenants[0](default).policy.deny_paths[0]: a glob with a slash must start with / or **/"},
 		{"sad/deny_paths entry empty", "deny_paths: []", `deny_paths: ['']`, "tenants[0](default).policy.deny_paths[0]: must be 1 to 1024 bytes"},
+		{"happy/any-depth glob", "deny_paths: []", `deny_paths: ['**/.aws/credentials']`, ""},
+		{"happy/subtree glob", "deny_paths: []", `deny_paths: ['/srv/secret/**']`, ""},
+		{"happy/any-depth subtree glob", "deny_paths: []", `deny_paths: ['**/.config/gcloud/**']`, ""},
+		{"sad/double star in the middle", "deny_paths: []", `deny_paths: ['/srv/**/x']`, "tenants[0](default).policy.deny_paths[0]: ** is allowed only as the whole first or last path element"},
+		{"sad/double star inside an element", "deny_paths: []", `deny_paths: ['/srv/a**']`, "tenants[0](default).policy.deny_paths[0]: ** is allowed only as the whole first or last path element"},
+		{"sad/double star alone", "deny_paths: []", `deny_paths: ['**']`, "tenants[0](default).policy.deny_paths[0]: ** is allowed only as the whole first or last path element"},
+		{"sad/deny_commands error quotes the pattern", "deny_commands: []", "deny_commands: [\"(\\x1b\"]", `tenants[0](default).policy.deny_commands[0]: does not compile as an RE2 expression: missing closing ) in "(\x1b"`},
+		{"edge/256 deny_commands entries", "deny_commands: []", "deny_commands: [" + repeatList("'x'", 256) + "]", ""},
+		{"raging/257 deny_commands entries", "deny_commands: []", "deny_commands: [" + repeatList("'x'", 257) + "]", "tenants[0](default).policy.deny_commands: at most 256 entries, got 257"},
+		{"edge/256 deny_paths entries", "deny_paths: []", "deny_paths: [" + repeatList("'x'", 256) + "]", ""},
+		{"raging/257 deny_paths entries", "deny_paths: []", "deny_paths: [" + repeatList("'x'", 257) + "]", "tenants[0](default).policy.deny_paths: at most 256 entries, got 257"},
 		{"sad/unknown key in policy", "deny_paths: []", "deny_paths: []\n      allow_commands: []", "tenants[0](default).policy.allow_commands: unknown key"},
 	})
 }
 
+// wantLimit is the spec 5.1 table as this test states it, independently of
+// limitTable: a changed default, bound or pair in limits.go must also be
+// changed here (and in the spec callout), or this test fails.
+type wantLimit struct {
+	key           string
+	def, min, max int64
+	get           func(tenant.Limits) int64
+}
+
+var wantLimits = []wantLimit{
+	{"default_wait_seconds", 30, 0, 290, func(l tenant.Limits) int64 { return l.DefaultWaitSeconds }},
+	{"max_wait_seconds", 60, 1, 290, func(l tenant.Limits) int64 { return l.MaxWaitSeconds }},
+	{"default_timeout_seconds", 600, 1, 86400, func(l tenant.Limits) int64 { return l.DefaultTimeoutSeconds }},
+	{"max_timeout_seconds", 3600, 1, 86400, func(l tenant.Limits) int64 { return l.MaxTimeoutSeconds }},
+	{"max_concurrent_commands", 4, 1, 64, func(l tenant.Limits) int64 { return l.MaxConcurrentCommands }},
+	{"max_concurrent_per_server", 2, 1, 64, func(l tenant.Limits) int64 { return l.MaxConcurrentPerServer }},
+	{"max_command_bytes", 8192, 1, 65536, func(l tenant.Limits) int64 { return l.MaxCommandBytes }},
+	{"max_output_bytes", 16777216, 1024, 1073741824, func(l tenant.Limits) int64 { return l.MaxOutputBytes }},
+	{"max_result_bytes", 100000, 1024, 140000, func(l tenant.Limits) int64 { return l.MaxResultBytes }},
+	{"retention_days", 7, 1, 3650, func(l tenant.Limits) int64 { return l.RetentionDays }},
+	{"max_data_bytes", 1073741824, 1048576, 1099511627776, func(l tenant.Limits) int64 { return l.MaxDataBytes }},
+	{"max_upload_bytes", 1048576, 1, 1048576, func(l tenant.Limits) int64 { return l.MaxUploadBytes }},
+	{"kill_grace_seconds", 5, 1, 60, func(l tenant.Limits) int64 { return l.KillGraceSeconds }},
+	{"connect_timeout_seconds", 10, 1, 120, func(l tenant.Limits) int64 { return l.ConnectTimeoutSeconds }},
+	{"shutdown_grace_seconds", 20, 1, 300, func(l tenant.Limits) int64 { return l.ShutdownGraceSeconds }},
+}
+
+// wantPairs are the cross-field rules: lo must not exceed hi.
+var wantPairs = [][2]string{
+	{"default_wait_seconds", "max_wait_seconds"},
+	{"default_timeout_seconds", "max_timeout_seconds"},
+	{"max_concurrent_per_server", "max_concurrent_commands"},
+	{"max_output_bytes", "max_data_bytes"},
+}
+
+func wantLimitByKey(t testing.TB, key string) wantLimit {
+	t.Helper()
+	for _, w := range wantLimits {
+		if w.key == key {
+			return w
+		}
+	}
+	t.Fatalf("no limit %s in wantLimits", key)
+	return wantLimit{}
+}
+
+// partnerOf returns the other key of the pair key is in, or "".
+func partnerOf(key string) string {
+	for _, p := range wantPairs {
+		if p[0] == key {
+			return p[1]
+		}
+		if p[1] == key {
+			return p[0]
+		}
+	}
+	return ""
+}
+
 func TestParseLimits(t *testing.T) {
 	k := genKeys(t)
-	for _, s := range limitTable {
-		// The default of every limit is inside its own range.
-		t.Run("happy/"+s.key+" default in range", func(t *testing.T) {
-			if s.def < s.min || s.def > s.max {
-				t.Fatalf("default %d outside [%d, %d]", s.def, s.min, s.max)
+	t.Run("happy/every limit key is in the test table", func(t *testing.T) {
+		if len(wantLimits) != 15 {
+			t.Fatalf("wantLimits has %d rows, want 15", len(wantLimits))
+		}
+		text := k.base()
+		var b strings.Builder
+		for _, w := range wantLimits {
+			fmt.Fprintf(&b, "%s: %d, ", w.key, w.def)
+		}
+		cfg, err := Parse([]byte(edit(t, text, "limits: {}", "limits: {"+strings.TrimSuffix(b.String(), ", ")+"}")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range wantLimits {
+			if got := w.get(cfg.Tenants[0].Limits); got != w.def {
+				t.Errorf("%s = %d, want %d", w.key, got, w.def)
 			}
-		})
+			if got := w.get(DefaultLimits()); got != w.def {
+				t.Errorf("default %s = %d, want %d", w.key, got, w.def)
+			}
+		}
+	})
+	for _, w := range wantLimits {
 		// A bound that would break a cross-field rule on its own is paired
 		// with an in-range value of the partner that keeps the rule.
 		partner := func(v int64) string {
-			for _, p := range limitPairs {
-				other := ""
-				switch s.key {
-				case p.lo:
-					other = p.hi
-				case p.hi:
-					other = p.lo
-				default:
-					continue
-				}
-				o, _ := limitByKey(other)
-				return fmt.Sprintf(", %s: %d", other, min(max(v, o.min), o.max))
+			other := partnerOf(w.key)
+			if other == "" {
+				return ""
 			}
-			return ""
+			o := wantLimitByKey(t, other)
+			return fmt.Sprintf(", %s: %d", other, min(max(v, o.min), o.max))
 		}
 		for _, c := range []struct {
 			class string
 			v     int64
 			ok    bool
 		}{
-			{"edge/minimum", s.min, true},
-			{"edge/maximum", s.max, true},
-			{"sad/below minimum", s.min - 1, false},
-			{"sad/above maximum", s.max + 1, false},
+			{"edge/minimum", w.min, true},
+			{"edge/maximum", w.max, true},
+			{"sad/below minimum", w.min - 1, false},
+			{"sad/above maximum", w.max + 1, false},
 		} {
-			t.Run(c.class+" "+s.key, func(t *testing.T) {
-				text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d%s}", s.key, c.v, partner(c.v)))
+			t.Run(c.class+" "+w.key, func(t *testing.T) {
+				text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d%s}", w.key, c.v, partner(c.v)))
 				cfg, err := Parse([]byte(text))
 				if c.ok {
 					if err != nil {
 						t.Fatalf("want valid, got:\n%v", err)
 					}
-					l := cfg.Tenants[0].Limits
-					if got := *s.field(&l); got != c.v {
-						t.Fatalf("%s = %d, want %d", s.key, got, c.v)
+					if got := w.get(cfg.Tenants[0].Limits); got != c.v {
+						t.Fatalf("%s = %d, want %d", w.key, got, c.v)
 					}
 					return
 				}
-				wantProblem(t, err, fmt.Sprintf("tenants[0](default).limits.%s: must be between %d and %d", s.key, s.min, s.max))
+				wantProblem(t, err, fmt.Sprintf("tenants[0](default).limits.%s: must be between %d and %d", w.key, w.min, w.max))
 			})
 		}
 	}
-	for _, p := range limitPairs {
-		t.Run("sad/"+p.lo+" above "+p.hi, func(t *testing.T) {
-			lo, _ := limitByKey(p.lo)
-			hi, _ := limitByKey(p.hi)
-			v := max(lo.min, hi.min) + 1
-			text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d, %s: %d}", p.lo, v, p.hi, v-1))
+	for _, p := range wantPairs {
+		lo, hi := wantLimitByKey(t, p[0]), wantLimitByKey(t, p[1])
+		v := max(lo.min, hi.min) + 1
+		t.Run("sad/"+p[0]+" above "+p[1], func(t *testing.T) {
+			text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d, %s: %d}", p[0], v, p[1], v-1))
 			_, err := Parse([]byte(text))
-			wantProblem(t, err, fmt.Sprintf("tenants[0](default).limits.%s: must not exceed %s (%d > %d)", p.lo, p.hi, v, v-1))
+			wantProblem(t, err, fmt.Sprintf("tenants[0](default).limits.%s: must not exceed %s (%d > %d)", p[0], p[1], v, v-1))
 		})
-		t.Run("edge/"+p.lo+" equal to "+p.hi, func(t *testing.T) {
-			lo, _ := limitByKey(p.lo)
-			hi, _ := limitByKey(p.hi)
-			v := max(lo.min, hi.min) + 1
-			text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d, %s: %d}", p.lo, v, p.hi, v))
+		t.Run("edge/"+p[0]+" equal to "+p[1], func(t *testing.T) {
+			text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d, %s: %d}", p[0], v, p[1], v))
 			if _, err := Parse([]byte(text)); err != nil {
 				t.Fatalf("want valid, got:\n%v", err)
 			}
 		})
-		t.Run("corner/"+p.lo+" above the default of "+p.hi, func(t *testing.T) {
-			hi, _ := limitByKey(p.hi)
-			lo, _ := limitByKey(p.lo)
-			if hi.def+1 > lo.max {
-				return // cannot exceed the partner's default inside the range
-			}
-			text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d}", p.lo, hi.def+1))
-			_, err := Parse([]byte(text))
-			wantProblem(t, err, fmt.Sprintf("tenants[0](default).limits.%s: must not exceed %s", p.lo, p.hi))
-		})
 	}
+	t.Run("corner/no pair rule beyond the four of spec 5.1", func(t *testing.T) {
+		// Every in-range combination that breaks none of the four pairs is
+		// accepted: lo at its maximum, hi at its minimum, for unpaired keys.
+		for _, a := range wantLimits {
+			for _, b := range wantLimits {
+				if a.key == b.key || partnerOf(a.key) == b.key || partnerOf(a.key) != "" || partnerOf(b.key) != "" {
+					continue
+				}
+				text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d, %s: %d}", a.key, a.max, b.key, b.min))
+				if _, err := Parse([]byte(text)); err != nil {
+					t.Fatalf("%s=%d with %s=%d rejected:\n%v", a.key, a.max, b.key, b.min, err)
+				}
+			}
+		}
+	})
 	runRuleCases(t, k, []ruleCase{
 		{"happy/limits absent", "    limits: {}\n", "", ""},
 		{"happy/limits null", "limits: {}", "limits: ~", ""},
@@ -408,8 +505,9 @@ func TestParseDocumentRules(t *testing.T) {
 		{"sad/empty file", "", "config: the file is empty"},
 		{"sad/only a comment", "# nothing\n", "config: the file is empty"},
 		{"sad/null document", "~\n", "config: the file is empty"},
-		{"sad/root is a list", "- a\n", "expected a mapping, got a sequence"},
-		{"sad/root is a string", "hello\n", "expected a mapping, got a string"},
+		{"sad/root is a list", "- a\n", "config: expected a mapping, got a sequence"},
+		{"sad/root is a string", "hello\n", "config: expected a mapping, got a string"},
+		{"raging/anchored root", "&r {version: 1}\n", "config: anchors are not supported"},
 		{"sad/syntax error", "version: 1\n  bad: [\n", "config: "},
 		{"sad/two documents", k.base() + "---\nversion: 1\n", "config: the file must hold exactly one YAML document"},
 		{"raging/anchor and alias", edit(t, k.base(), "  listen: 127.0.0.1:8822", "  listen: &l 127.0.0.1:8822") + "x: *l\n", "server.listen: anchors are not supported"},
@@ -570,6 +668,50 @@ func TestLoad(t *testing.T) {
 		_, err := Load(writeConfig(t, k.dir, text))
 		wantProblem(t, err, "tenants[0](default).servers[0](lab-1).known_hosts_file: is not a regular file")
 	})
+	t.Run("known_hosts markers and patterns", func(t *testing.T) {
+		k := genKeys(t)
+		key := k.hostKey
+		other := strings.TrimSpace(string(sshAuthorized(k.otherPub)))
+		hashed := knownhosts.HashHostname("lab-1.example.net")
+		cases := []struct {
+			name, content, want string // want "" = accepted
+		}{
+			{"happy/plain entry", "lab-1.example.net " + key + "\n", ""},
+			{"happy/hashed entry that matches", hashed + " " + key + "\n", ""},
+			{"sad/hashed entry for another host", knownhosts.HashHostname("other.example.net") + " " + key + "\n", "lists no key for lab-1.example.net:22"},
+			{"happy/wildcard pattern pins the key for every match", "*.example.net " + key + "\n", ""},
+			{"happy/a listed key beside a revoked other key", "lab-1.example.net " + key + "\n@revoked * " + other + "\n", ""},
+			{"sad/cert-authority line only", "@cert-authority lab-1.example.net " + key + "\n", "holds a @cert-authority line; SSH certificates are not supported in this version"},
+			{"sad/cert-authority line beside a plain key", "lab-1.example.net " + key + "\n@cert-authority *.example.net " + other + "\n", "holds a @cert-authority line"},
+			{"sad/key listed and also revoked", "lab-1.example.net " + key + "\n@revoked * " + key + "\n", "lists only revoked keys for lab-1.example.net:22"},
+			{"sad/revoked line only", "@revoked lab-1.example.net " + key + "\n", "lists no key for lab-1.example.net:22"},
+			{"sad/entry for another port", "[lab-1.example.net]:2222 " + key + "\n", "lists no key for lab-1.example.net:22"},
+			{"edge/empty file", "", "lists no key for lab-1.example.net:22"},
+			{"edge/comments only", "# nothing here\n", "lists no key for lab-1.example.net:22"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				kh := filepath.Join(t.TempDir(), "known_hosts")
+				writeFile(t, kh, []byte(c.content), 0o644)
+				text := edit(t, k.base(), "host_key: \""+k.hostKey+"\"", "known_hosts_file: "+kh)
+				_, err := Load(writeConfig(t, t.TempDir(), text))
+				if c.want == "" {
+					if err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+				wantProblem(t, err, "tenants[0](default).servers[0](lab-1).known_hosts_file: "+c.want)
+			})
+		}
+		t.Run("raging/known_hosts file larger than 1 MiB", func(t *testing.T) {
+			kh := filepath.Join(t.TempDir(), "known_hosts")
+			writeFile(t, kh, []byte(strings.Repeat("#", maxKnownHostsBytes+1)), 0o644)
+			text := edit(t, k.base(), "host_key: \""+k.hostKey+"\"", "known_hosts_file: "+kh)
+			_, err := Load(writeConfig(t, t.TempDir(), text))
+			wantProblem(t, err, "known_hosts_file: is larger than 1 MiB")
+		})
+	})
 	t.Run("sad/config file missing", func(t *testing.T) {
 		_, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 		wantProblem(t, err, "config: cannot read the file")
@@ -641,7 +783,7 @@ func TestLoadPrivateKey(t *testing.T) {
 		}, "does not parse as a private key"},
 		{"raging/too large", func(t *testing.T, k *keys) string {
 			p := filepath.Join(k.dir, "big")
-			writeFile(t, p, make([]byte, maxKeyFileBytes+1), 0o600)
+			writeFile(t, p, make([]byte, keyfile.MaxBytes+1), 0o600)
 			return p
 		}, "is too large to be a private key"},
 		{"corner/a key readable by others is refused without reading it", func(t *testing.T, k *keys) string {
