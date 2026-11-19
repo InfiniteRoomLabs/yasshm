@@ -27,7 +27,7 @@ A phase is the commit range from its start commit (the phase base) to its ship c
 | Phase | Status | Phase base .. ship commit | Notes |
 |---|---|---|---|
 | 0 Scaffold | SHIPPED | `34d6001` .. the commit `docs(phase-0): ship scaffold` | Gate: code review REQUEST CHANGES (1 blocking), security PASS, QA NEEDS WORK on the same blocker; fixed in `27e6c67`; gate and CI green after it. Coverage 95.2 percent |
-| 1 Config, tenants, policy, audit | not started | -- | Next |
+| 1 Config, tenants, policy, audit | in progress | base: the commit `docs(phase-1): start config, tenants, policy, audit` | Premise: gate and CI green on the Phase 0 ship commit; the YAML library choice (F18) is the implementer's first step |
 | 2 SSH layer | not started | -- | |
 | 3 Jobs, store, outputs | not started | -- | |
 | 4 Authenticator | not started | -- | |
