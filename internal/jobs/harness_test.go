@@ -221,6 +221,24 @@ func (h *harness) open() *Engine {
 	return e
 }
 
+// settle waits until the janitor pass that any finished command asked for
+// has run, so a test that changes the clock or the janitor's hooks next is
+// not raced by it.
+func (h *harness) settle() {
+	h.t.Helper()
+	reply := make(chan struct{})
+	select {
+	case h.e.settleReq <- reply:
+	case <-time.After(30 * time.Second):
+		h.t.Fatal("the janitor did not take the settle request")
+	}
+	select {
+	case <-reply:
+	case <-time.After(30 * time.Second):
+		h.t.Fatal("the janitor did not finish its pass")
+	}
+}
+
 func (h *harness) setClock(t time.Time) {
 	h.clockMu.Lock()
 	h.clock = t

@@ -146,11 +146,32 @@ func (e *Engine) janitor() {
 	defer t.Stop()
 	for {
 		e.report(e.Sweep(e.root))
+		if !e.janitorWait(t.C) {
+			return
+		}
+	}
+}
+
+// janitorWait waits for the next reason to run a pass and reports false at
+// Shutdown. A settle request (tests) runs the pass a pending wake asks for,
+// then answers, so every command that finished before the request has had
+// its pass.
+func (e *Engine) janitorWait(tick <-chan time.Time) bool {
+	for {
 		select {
 		case <-e.janitorStop:
-			return
-		case <-t.C:
+			return false
+		case <-tick:
+			return true
 		case <-e.wake:
+			return true
+		case reply := <-e.settleReq:
+			select {
+			case <-e.wake:
+				e.report(e.Sweep(e.root))
+			default:
+			}
+			close(reply)
 		}
 	}
 }
@@ -191,8 +212,12 @@ const janitorBatch = 100
 // full disk), it deletes the directory first to free space and tries the
 // record again. It never touches a running command or another tenant's data.
 // Then it removes output directories that have no record, and retries the
-// store writes of command ends that failed.
+// store writes of command ends that failed. Passes run one at a time: a call
+// waits for a pass in flight (the janitor's or another caller's), so two
+// passes never work on the same records at once.
 func (e *Engine) Sweep(ctx context.Context) error {
+	e.sweepMu.Lock()
+	defer e.sweepMu.Unlock()
 	if err := e.usable(); err != nil {
 		return err
 	}

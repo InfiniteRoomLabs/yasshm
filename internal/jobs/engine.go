@@ -175,7 +175,9 @@ type Engine struct {
 	storeClosed  atomic.Bool
 	janitorStop  chan struct{}
 	janitorDone  chan struct{}
-	wake         chan struct{} // one slot: a command finished, run the janitor
+	wake         chan struct{}      // one slot: a command finished, run the janitor
+	settleReq    chan chan struct{} // tests: answered once a pending wake's pass has run
+	sweepMu      sync.Mutex         // one janitor pass at a time
 	shutdownDone chan struct{}
 	shutdownErr  error
 }
@@ -240,7 +242,7 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	e := &Engine{
 		cfg: cfg, st: st, tenants: tenants, root: root, cancelRoot: cancel, openOutput: defaultOpenOutput,
 		jobs: map[key]*job{}, pending: map[key]*pendingEnd{}, janitorStop: make(chan struct{}), janitorDone: make(chan struct{}),
-		wake: make(chan struct{}, 1), shutdownDone: make(chan struct{}),
+		wake: make(chan struct{}, 1), settleReq: make(chan chan struct{}), shutdownDone: make(chan struct{}),
 	}
 	e.hk = hooks{finishRow: st.Finish, deleteRow: st.DeleteFinished}
 	if _, err := e.Recover(ctx); err != nil {

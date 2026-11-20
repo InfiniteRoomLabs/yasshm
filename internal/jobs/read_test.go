@@ -395,6 +395,7 @@ func TestJanitor(t *testing.T) {
 		if _, err := h.e.Wait(t.Context(), tB, rb.ID, 30*time.Second); err != nil {
 			t.Fatal(err)
 		}
+		h.settle()
 		h.setClock(t0.Add(7*day + time.Hour))
 		if err := h.e.Sweep(t.Context()); err != nil {
 			t.Fatal(err)
@@ -415,6 +416,7 @@ func TestJanitor(t *testing.T) {
 		if _, err := h.e.Get(t.Context(), tB, rb.ID); err != nil {
 			t.Fatal(err)
 		}
+		h.settle()
 		h.setClock(t0.Add(30 * day))
 		if err := h.e.Sweep(t.Context()); err != nil {
 			t.Fatal(err)

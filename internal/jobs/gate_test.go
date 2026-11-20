@@ -89,6 +89,7 @@ func TestDataQuota(t *testing.T) {
 		if o, err := h.e.ReadOutput(t.Context(), tA, r.ID, ReadRequest{Stream: StreamStdout, Offset: 9, Wait: 10 * time.Second}); err != nil || len(o.Data) != 1 {
 			t.Fatalf("%v %+v", err, o)
 		}
+		h.settle()
 		if err := h.e.Sweep(t.Context()); err != nil {
 			t.Fatal(err)
 		}
@@ -108,6 +109,7 @@ func TestFullDisk(t *testing.T) {
 		h := newHarness(t)
 		var full atomic.Bool
 		full.Store(true)
+		h.settle()
 		h.e.setHooks(func(hk *hooks) {
 			orig := hk.finishRow
 			hk.finishRow = func(ctx context.Context, tid tenant.TenantID, id tenant.CommandID, f *store.Final) error {
@@ -118,6 +120,7 @@ func TestFullDisk(t *testing.T) {
 			}
 		})
 		r := h.wait(h.start("echo x", StartOptions{}).ID)
+		h.settle()
 		if r.Status != StatusSucceeded || r.FinishedAt.IsZero() || r.StoredBytes != 2 {
 			t.Fatalf("%+v", r)
 		}
@@ -160,6 +163,7 @@ func TestFullDisk(t *testing.T) {
 		r := h.wait(h.start("echo old", StartOptions{}).ID)
 		dir, _ := commandDir(h.dir, tA, r.ID)
 		var calls atomic.Int32
+		h.settle()
 		h.e.setHooks(func(hk *hooks) {
 			orig := hk.deleteRow
 			hk.deleteRow = func(ctx context.Context, tid tenant.TenantID, id tenant.CommandID) error {
@@ -191,6 +195,7 @@ func TestFullDisk(t *testing.T) {
 		t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 		h.setClock(t0)
 		r := h.wait(h.start("echo old", StartOptions{}).ID)
+		h.settle()
 		h.e.setHooks(func(hk *hooks) {
 			hk.deleteRow = func(context.Context, tenant.TenantID, tenant.CommandID) error { return errDiskFull }
 		})
@@ -241,6 +246,7 @@ func TestKillRaces(t *testing.T) {
 	t.Run("corner/a kill that races a natural exit is not counted as a kill", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
+		h.settle()
 		h.e.setHooks(func(hk *hooks) {
 			hk.beforeSignal = func(j *job) {
 				<-j.h.Done()
@@ -380,6 +386,52 @@ type zeroReader struct{}
 func (zeroReader) Read(p []byte) (int, error) {
 	copy(p, bytes.Repeat([]byte{0}, len(p)))
 	return len(p), nil
+}
+
+func TestSweepSerialized(t *testing.T) {
+	t.Parallel()
+	t.Run("corner/two concurrent sweeps never work on the same records at once", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		t0 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+		h.setClock(t0)
+		for range 3 {
+			h.wait(h.start("echo old", StartOptions{}).ID)
+		}
+		h.settle()
+		var active, overlap atomic.Int32
+		h.e.setHooks(func(hk *hooks) {
+			orig := hk.deleteRow
+			hk.deleteRow = func(ctx context.Context, tid tenant.TenantID, id tenant.CommandID) error {
+				if active.Add(1) > 1 {
+					overlap.Store(1)
+				}
+				defer active.Add(-1)
+				// Stay inside the call for a moment, so a second pass
+				// running beside this one is caught here.
+				time.Sleep(100 * time.Millisecond)
+				return orig(ctx, tid, id)
+			}
+		})
+		h.setClock(t0.Add(8 * 24 * time.Hour))
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := h.e.Sweep(context.Background()); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		if overlap.Load() != 0 {
+			t.Fatal("two passes deleted records at the same time")
+		}
+		if p, _ := h.e.List(t.Context(), tA, ListFilter{}); len(p.Records) != 0 {
+			t.Fatalf("%d records left", len(p.Records))
+		}
+	})
 }
 
 // TestLeaks runs the engine's main paths with the goroutine leak check. It
