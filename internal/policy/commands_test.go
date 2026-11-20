@@ -191,3 +191,30 @@ func TestCommandGuardRails(t *testing.T) {
 		})
 	}
 }
+
+// TestCommandRuleNeeds: every built-in rule names the literals that its
+// matches contain, and on every case of every rule (must-match and
+// must-not-match) skipping a rule whose literals are absent agrees with
+// running its expression.
+func TestCommandRuleNeeds(t *testing.T) {
+	for _, b := range builtinCommands {
+		t.Run("happy/"+b.Name, func(t *testing.T) {
+			if len(b.Needs) == 0 {
+				t.Fatal("a built-in rule has no literals")
+			}
+			for _, c := range commandCases {
+				for _, s := range append(append([]string(nil), c.match...), c.noMatch...) {
+					s = strings.TrimSpace(s)
+					if !b.mayMatch(s) && b.re.MatchString(s) {
+						t.Fatalf("%q matches without any of %q", s, b.Needs)
+					}
+				}
+			}
+		})
+	}
+	t.Run("edge/an operator rule always runs", func(t *testing.T) {
+		if !(commandRule{Name: "deny_commands[0]"}).mayMatch("") {
+			t.Fatal("a rule without literals was skipped")
+		}
+	})
+}

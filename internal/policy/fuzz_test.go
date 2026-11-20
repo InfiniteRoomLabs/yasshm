@@ -27,6 +27,16 @@ func FuzzCommandGuardRail(f *testing.F) {
 	f.Add("echo $'a\\'b", uint8(0))
 	f.Fuzz(func(t *testing.T, cmd string, pad uint8) {
 		r := &tenantRules{maxCommandBytes: 1 << 16}
+		// The literal prefilter never hides a match: a rule whose
+		// literals are all absent does not match (so skipping it
+		// changes no decision).
+		for _, s := range []string{cmd, strings.TrimSpace(cmd)} {
+			for _, b := range builtinCommands {
+				if !b.mayMatch(s) && b.re.MatchString(s) {
+					t.Fatalf("rule %s matches %q without any of %q", b.Name, s, b.Needs)
+				}
+			}
+		}
 		// A newline always starts a command, whatever the line before it
 		// holds (an open quote, a comment, a here-doc line).
 		if nl := r.checkCommand(cmd + "\nsudo id"); nl.Allow {

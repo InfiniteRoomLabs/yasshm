@@ -234,7 +234,7 @@ func (r *tenantRules) checkCommand(cmd string) Decision {
 	}
 	c := strings.TrimSpace(cmd)
 	for _, b := range builtinCommands {
-		if b.re.MatchString(c) {
+		if b.mayMatch(c) && b.re.MatchString(c) {
 			return deny(CodePolicyDenied, b.Name)
 		}
 	}
