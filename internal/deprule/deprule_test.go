@@ -27,6 +27,7 @@ var allowed = map[string][]string{
 	"store":     {"internal/tenant"},
 	"jobs":      {"internal/tenant", "internal/sshclient", "internal/store", "internal/audit"},
 	"auth":      {"internal/config", "internal/tenant", "internal/audit"},
+	"mcpserver": {"internal/tenant", "internal/config", "internal/keyfile", "internal/hostkey", "internal/policy", "internal/audit", "internal/sshclient", "internal/store", "internal/jobs", "internal/auth"},
 }
 
 // testAllowed is added to allowed for _test.go files: test support only.

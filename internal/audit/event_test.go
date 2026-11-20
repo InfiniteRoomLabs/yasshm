@@ -51,6 +51,9 @@ func TestEvents(t *testing.T) {
 		{"sad/policy.denied", PolicyDenied(actor, "run_command", "lab-1", "policy_denied", "sudo"), map[string]any{
 			"event": "policy.denied", "request_id": "req-1", "tenant": "default", "principal": "user:operator@example.net", "tool": "run_command", "server": "lab-1",
 			"decision": "deny", "code": "policy_denied", "rule": "sudo"}},
+		{"sad/tool.failed", ToolFailed(actor, "run_command", "lab-1", "busy"), map[string]any{
+			"event": "tool.failed", "request_id": "req-1", "tenant": "default", "principal": "user:operator@example.net", "tool": "run_command", "server": "lab-1",
+			"code": "busy"}},
 		{"happy/command.requested", CommandRequested(actor, "lab-1", "c1", "uptime", 600), map[string]any{
 			"event": "command.requested", "request_id": "req-1", "tenant": "default", "principal": "user:operator@example.net", "tool": "run_command",
 			"server": "lab-1", "command_id": "c1", "command": "uptime", "timeout_seconds": float64(600)}},
@@ -98,7 +101,7 @@ func TestEvents(t *testing.T) {
 		seen[tt.ev.Name()] = true
 	}
 	t.Run("happy/every event of spec 5.4 has a constructor under test", func(t *testing.T) {
-		for _, name := range []string{EventAuthAccepted, EventAuthRejected, EventToolCalled, EventPolicyDenied, EventCommandRequested,
+		for _, name := range []string{EventAuthAccepted, EventAuthRejected, EventToolCalled, EventPolicyDenied, EventToolFailed, EventCommandRequested,
 			EventCommandStarted, EventCommandFinished, EventCommandKillRequested, EventFileDownloaded, EventFileUploaded,
 			EventGatewayStarted, EventGatewayStopped} {
 			if !seen[name] {

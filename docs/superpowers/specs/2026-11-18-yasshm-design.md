@@ -148,21 +148,23 @@ Limits and their defaults (all under `limits`, per tenant): `default_wait_second
 >
 > | Limit | Default | Min | Max | Why the bounds |
 > |---|---|---|---|---|
-> | `default_wait_seconds` | 30 | 0 | 290 | 0 returns at once; never above `max_wait_seconds` |
-> | `max_wait_seconds` | 60 | 1 | 290 | under the client's 300 s tool-call limit (F3); the edge may cut at about 100 s (F15) |
+> | `default_wait_seconds` | 30 | 0 | 110 | 0 returns at once; never above `max_wait_seconds` |
+> | `max_wait_seconds` | 60 | 1 | 110 | under the edge's 125 s proxy read timeout (F15) and the client's 240 s tool-call limit (F3), with margin (Phase 5) |
 > | `default_timeout_seconds` | 600 | 1 | 86400 | never above `max_timeout_seconds` |
 > | `max_timeout_seconds` | 3600 | 1 | 86400 | a day is the longest job a tool call should start |
 > | `max_concurrent_commands` | 4 | 1 | 64 | one connection per command (D13) |
 > | `max_concurrent_per_server` | 2 | 1 | 64 | never above `max_concurrent_commands` |
 > | `max_command_bytes` | 8192 | 1 | 65536 | far above a typed command, below `ARG_MAX` |
 > | `max_output_bytes` | 16777216 | 1024 | 1073741824 | never above `max_data_bytes` |
-> | `max_result_bytes` | 100000 | 1024 | 140000 | the client caps a result at about 150,000 characters (F3) |
+> | `max_result_bytes` | 100000 | 4096 | 140000 | the client caps a result at about 150,000 characters (F3); at least 4 KiB so a result holds its fields and a page header (Phase 5) |
 > | `retention_days` | 7 | 1 | 3650 | |
 > | `max_data_bytes` | 1073741824 | 1048576 | 1099511627776 | |
 > | `max_upload_bytes` | 1048576 | 1 | 1048576 | the 2 MiB body cap (5.8): 1.5 MiB is exactly 2 MiB once base64-encoded, with no room for the JSON around it |
 > | `kill_grace_seconds` | 5 | 1 | 60 | |
 > | `connect_timeout_seconds` | 10 | 1 | 120 | |
 > | `shutdown_grace_seconds` | 20 | 1 | 300 | |
+>
+> Revised in Phase 5 (2026-11-20): the maximum of `default_wait_seconds` and `max_wait_seconds` is 110 (was 290). A tool call is answered with plain JSON only when it is done (the response mode chosen against F15, 5.8 callout), so nothing travels while `run_command` or `read_output` waits; the edge closes a request whose origin sends nothing for 125 seconds (F15) and the client gives up after 240 (F3), so the longest wait stays under both with room for reading the output and the round trip. The defaults stay 30 and 60. The minimum of `max_result_bytes` is 4096 (was 1024): a result carries a status, offsets and a text header besides the output, and 1 KiB left no room for a page.
 >
 > Cross-field rules: `default_wait_seconds <= max_wait_seconds`, `default_timeout_seconds <= max_timeout_seconds`, `max_concurrent_per_server <= max_concurrent_commands`, `max_output_bytes <= max_data_bytes`.
 >
@@ -198,6 +200,8 @@ One JSON object per line, appended with `O_APPEND`, file mode 0600, synced after
 Audit-before-act (D12): the handler writes `command.requested`, `command.kill_requested` or the file event's "requested" form first; if the write or sync fails, the tool returns `internal` and nothing else happens. The audit log is sensitive (it holds command text); it never holds output, tokens or key material. Rotation is out of scope (section 10).
 
 > **STATE AS OF 2026-11-19** -- Built in Phase 1 (`internal/audit`). The "requested" form of a file event is the same event name with `"stage": "requested"`, and the form written after the transfer has `"stage": "done"`; there are no extra event names. Timestamps are RFC 3339 with fractional seconds, in UTC. `audit.Open` also refuses a symbolic link (`O_NOFOLLOW`), a file that is not regular, and an existing file whose mode gives group or other any access (read from the open file, so it holds for root). After a failed write or sync the logger refuses every later write until the gateway restarts, because a failed write can leave a partial line. Events are built only by typed constructors (`audit.CommandRequested` and the rest); `auth.rejected` reasons are a closed set (`missing_token`, `invalid_token`, `unmapped_principal`, `keys_unavailable`; Phase 4 added one per check of the authenticator, and the summary reason `suppressed`, whose event alone carries a `count` field; see the 5.7 callout). Revised after the Phase 1 review gate (same day): `Open` refuses a path that is not a regular file before opening it (a FIFO cannot block it) and refuses a log not owned by the effective uid; if the existing log does not end in a newline it writes one first, so a partial line left by a crash cannot swallow the next event. Events are encoded without HTML escaping (`&`, `<`, `>` stay literal; JSON escaping still keeps each event on one line), an event with an empty name is refused, and `gateway.stopped` takes a closed set of reasons (`signal`, `error`). `O_NOFOLLOW` covers the last path element only; a link in a parent directory needs root on the gateway host, which section 6 puts out of scope. Event-specific fields: `reason`, `args`, `command`, `timeout_seconds`, `status`, `exit_code`, `signal`, `error_code`, `stdout_bytes`, `stderr_bytes`, `truncated`, `duration_ms`, `stage`, `path`, `offset`, `bytes`, `mode`, `overwrite`, `version`, `listen`; an upload's content is recorded only as `content_bytes`.
+
+> **STATE AS OF 2026-11-20** -- Phase 5 adds one event, `tool.failed` (`audit.ToolFailed`): written after `tool.called` when a call is answered with an error that is not a policy denial (`policy.denied` records those), with the tool, the server when known and the error `code` of 5.8, never a message or an argument. Without it an `invalid_argument`, `busy`, SSH or `internal` answer, a recovered panic included, would leave only `tool.called` behind. A failed `tool.failed` write is logged; the call has already been refused.
 
 ### 5.5 SSH client (`yasshm.ssh`)
 

@@ -12,6 +12,7 @@ const (
 	EventAuthRejected         = "auth.rejected"
 	EventToolCalled           = "tool.called"
 	EventPolicyDenied         = "policy.denied"
+	EventToolFailed           = "tool.failed"
 	EventCommandRequested     = "command.requested"
 	EventCommandStarted       = "command.started"
 	EventCommandFinished      = "command.finished"
@@ -201,6 +202,15 @@ func ToolCalled(a Actor, tool string, server tenant.ServerID, args ToolArgs) Eve
 	r := a.record(EventToolCalled)
 	r.Tool, r.Server = tool, server
 	r.Args = &args
+	return Event{r}
+}
+
+// ToolFailed records a tool call that was answered with an error other than
+// a policy denial (policy.denied records those): code is the tool error
+// code of spec 5.8. It carries no message and no argument.
+func ToolFailed(a Actor, tool string, server tenant.ServerID, code string) Event {
+	r := a.record(EventToolFailed)
+	r.Tool, r.Server, r.Code = tool, server, code
 	return Event{r}
 }
 

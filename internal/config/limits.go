@@ -23,10 +23,12 @@ const (
 // ranges are this package's choice, and the reasons are on each row.
 var limitTable = []limitSpec{
 	// 0 means "return at once with status running". Bounded by max_wait_seconds.
-	{"default_wait_seconds", 30, 0, 290, func(l *tenant.Limits) *int64 { return &l.DefaultWaitSeconds }},
-	// Below the client's 300 second tool-call limit (F3). The edge may cut a
-	// silent request at about 100 seconds (F15), which is why the default is 60.
-	{"max_wait_seconds", 60, 1, 290, func(l *tenant.Limits) *int64 { return &l.MaxWaitSeconds }},
+	{"default_wait_seconds", 30, 0, 110, func(l *tenant.Limits) *int64 { return &l.DefaultWaitSeconds }},
+	// A tool call answers with plain JSON (no stream) only when the wait is
+	// over, so the wait must stay under the edge's 125 second proxy read
+	// timeout (F15) and the client's 240 second tool-call limit (F3), with
+	// margin for the output read and the trip: 110.
+	{"max_wait_seconds", 60, 1, 110, func(l *tenant.Limits) *int64 { return &l.MaxWaitSeconds }},
 	// One day at most: a longer job is not what a tool call is for.
 	{"default_timeout_seconds", 600, 1, 86400, func(l *tenant.Limits) *int64 { return &l.DefaultTimeoutSeconds }},
 	{"max_timeout_seconds", 3600, 1, 86400, func(l *tenant.Limits) *int64 { return &l.MaxTimeoutSeconds }},
@@ -37,8 +39,9 @@ var limitTable = []limitSpec{
 	{"max_command_bytes", 8192, 1, 64 * kib, func(l *tenant.Limits) *int64 { return &l.MaxCommandBytes }},
 	{"max_output_bytes", 16 * mib, 1 * kib, 1 * gib, func(l *tenant.Limits) *int64 { return &l.MaxOutputBytes }},
 	// The client caps a tool result at about 150,000 characters (F3); leave
-	// room for the structured fields around the output.
-	{"max_result_bytes", 100000, 1 * kib, 140000, func(l *tenant.Limits) *int64 { return &l.MaxResultBytes }},
+	// room for the structured fields around the output. At least 4 KiB, so
+	// a result always holds its fields and a page header.
+	{"max_result_bytes", 100000, 4 * kib, 140000, func(l *tenant.Limits) *int64 { return &l.MaxResultBytes }},
 	{"retention_days", 7, 1, 3650, func(l *tenant.Limits) *int64 { return &l.RetentionDays }},
 	{"max_data_bytes", 1 * gib, 1 * mib, 1024 * gib, func(l *tenant.Limits) *int64 { return &l.MaxDataBytes }},
 	// The request body is capped at 2 MiB (spec 5.8) and base64 grows data by

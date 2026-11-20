@@ -336,15 +336,15 @@ type wantLimit struct {
 }
 
 var wantLimits = []wantLimit{
-	{"default_wait_seconds", 30, 0, 290, func(l tenant.Limits) int64 { return l.DefaultWaitSeconds }},
-	{"max_wait_seconds", 60, 1, 290, func(l tenant.Limits) int64 { return l.MaxWaitSeconds }},
+	{"default_wait_seconds", 30, 0, 110, func(l tenant.Limits) int64 { return l.DefaultWaitSeconds }},
+	{"max_wait_seconds", 60, 1, 110, func(l tenant.Limits) int64 { return l.MaxWaitSeconds }},
 	{"default_timeout_seconds", 600, 1, 86400, func(l tenant.Limits) int64 { return l.DefaultTimeoutSeconds }},
 	{"max_timeout_seconds", 3600, 1, 86400, func(l tenant.Limits) int64 { return l.MaxTimeoutSeconds }},
 	{"max_concurrent_commands", 4, 1, 64, func(l tenant.Limits) int64 { return l.MaxConcurrentCommands }},
 	{"max_concurrent_per_server", 2, 1, 64, func(l tenant.Limits) int64 { return l.MaxConcurrentPerServer }},
 	{"max_command_bytes", 8192, 1, 65536, func(l tenant.Limits) int64 { return l.MaxCommandBytes }},
 	{"max_output_bytes", 16777216, 1024, 1073741824, func(l tenant.Limits) int64 { return l.MaxOutputBytes }},
-	{"max_result_bytes", 100000, 1024, 140000, func(l tenant.Limits) int64 { return l.MaxResultBytes }},
+	{"max_result_bytes", 100000, 4096, 140000, func(l tenant.Limits) int64 { return l.MaxResultBytes }},
 	{"retention_days", 7, 1, 3650, func(l tenant.Limits) int64 { return l.RetentionDays }},
 	{"max_data_bytes", 1073741824, 1048576, 1099511627776, func(l tenant.Limits) int64 { return l.MaxDataBytes }},
 	{"max_upload_bytes", 1048576, 1, 1048576, func(l tenant.Limits) int64 { return l.MaxUploadBytes }},
