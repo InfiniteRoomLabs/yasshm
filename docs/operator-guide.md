@@ -24,7 +24,7 @@ flowchart LR
 
 ## What yasshm is not
 
-Read this before pointing it at a machine you care about. These are the spec's own words (section 6), and each is checked against `README.md` and the code by a test.
+Read this before pointing it at a machine you care about. These are the spec's own words (section 6) and this is the one place that says what to do about each; [SECURITY.md](../SECURITY.md) has the table of what is guaranteed and the test behind each guarantee, and `README.md` carries the list in short. Tests keep the phrases in `README.md` and the warnings in the tool descriptions true (`TestSecurityModelTable`), and nothing checks this page's wording.
 
 - **The `look` level is an unprivileged account, not a sandbox.** A command at `look` runs as the account you made on the target. What a command can change is decided by that account and the target's operating system, not by yasshm. Make the account unprivileged, outside every privileged group, with no `sudo` rights.
 - **The denylist is a guard rail, not a boundary.** The command and path denylists catch the obvious (privilege escalation, power control, raw device writes, recursive deletes of `/`, pipe-to-shell downloads, a fork bomb, shadow files, private keys, common secret file names), and you can add your own. They are regular expressions and globs, not a shell parser, and they can be bypassed: the package documentation and spec section 5.3 list the known ways (a command word built at run time, an option that takes a value before the command, a wrapper the list does not know, a download saved and run later, a symbolic link on the target, and more). Do not rely on them to keep a command harmless.
@@ -47,7 +47,7 @@ Read this before pointing it at a machine you care about. These are the spec's o
 
 The config is one YAML file, `/etc/yasshm/config.yaml` in the install steps, read once at start. Change it and restart the service; there is no reload. It is decoded strictly: an unknown key, a duplicate key, a wrong type, a missing required key, a YAML anchor or an alias is an error, and every problem is reported at once as `path.to.key: message (line N)`. Problem paths name list items by index and id, for example `tenants[0](default).servers[0](lab-1).host_key`. `yasshm config check --config <file>` validates the file and the files it names (private keys, `known_hosts` files) without connecting anywhere, and prints `config ok: 1 tenant, 1 server` on success. [deploy/config.example.yaml](../deploy/config.example.yaml) is a complete example with a comment on every key, and a test loads it through the real loader.
 
-File rules: at most 1 MiB, one YAML document, not writable by group or other (the gateway refuses it, because whoever can write it decides what the gateway trusts). Ids (tenant, identity, server, tag) match `^[a-z0-9][a-z0-9-]{0,62}$`. Exactly one tenant is accepted in this version. Four cross-field rules hold for the limits: `default_wait_seconds` is at most `max_wait_seconds`, `default_timeout_seconds` at most `max_timeout_seconds`, `max_concurrent_per_server` at most `max_concurrent_commands`, and `max_output_bytes` at most `max_data_bytes`; and `max_wait_seconds` plus twice `connect_timeout_seconds` must not exceed 120.
+A string value that starts with `REPLACE_` is refused with `path: replace the placeholder value`: the example config marks every value you must set that way, so a forgotten edit stops `config check`. File rules: at most 1 MiB, one YAML document, not writable by group or other (the gateway refuses it, because whoever can write it decides what the gateway trusts). Ids (tenant, identity, server, tag) match `^[a-z0-9][a-z0-9-]{0,62}$`. Exactly one tenant is accepted in this version. Four cross-field rules hold for the limits: `default_wait_seconds` is at most `max_wait_seconds`, `default_timeout_seconds` at most `max_timeout_seconds`, `max_concurrent_per_server` at most `max_concurrent_commands`, and `max_output_bytes` at most `max_data_bytes`; and `max_wait_seconds` plus twice `connect_timeout_seconds` must not exceed 120.
 
 The table lists every key the loader accepts. Paths are written from the top of the file; `[]` marks a list item and `NAME` the id that keys a mapping. A test checks that the table holds exactly the keys the decoder accepts and that every limit's default and range equal the limits table in the code.
 
@@ -84,7 +84,7 @@ The table lists every key the loader accepts. Paths are written from the top of 
 | `tenants[].limits.default_timeout_seconds` | no | 600 | 1 to 86400 | How long a command may run when the caller names no timeout. |
 | `tenants[].limits.max_timeout_seconds` | no | 3600 | 1 to 86400 | The longest timeout a caller may ask for. |
 | `tenants[].limits.max_concurrent_commands` | no | 4 | 1 to 64 | Commands running at once; over it a call is refused with `busy`. |
-| `tenants[].limits.max_concurrent_per_server` | no | 2 | 1 to 64 | Commands, probes and transfers running at once on one server. |
+| `tenants[].limits.max_concurrent_per_server` | no | 2 | 1 to 64 | Commands running at once on one server, and, counted apart, probes and file transfers running at once on one server. |
 | `tenants[].limits.max_command_bytes` | no | 8192 | 1 to 65536 | The longest command text accepted. |
 | `tenants[].limits.max_output_bytes` | no | 16777216 | 1024 to 1073741824 | The most output stored per command; the rest is dropped and the command is marked truncated. |
 | `tenants[].limits.max_result_bytes` | no | 100000 | 4096 to 140000 | The most bytes in one tool result. |
@@ -102,8 +102,8 @@ The built-in denylist entries have stable rule names, which appear as `rule` in 
 
 A server entry needs three things on the target and three in the config.
 
-1. On the target, an unprivileged account (the `look` account) whose `authorized_keys` line for the gateway's public key starts with `restrict` and has no forced command. `restrict` turns off forwarding, a terminal and the rest; a forced command would stop the gateway from signalling a command (an SSH `signal` request is not delivered under a forced command), and then `kill_command` could not work. [deploy/README.md](../deploy/README.md) has the exact line.
-2. The target's host key, as one line. Get it from the target itself (the `.pub` file of the host key it serves, read over a channel you trust) or from `ssh-keyscan` and compare its fingerprint with the one the target reports. Never accept what a first connection shows: a gateway that pins an unknown key can be pointed at an impostor.
+1. On the target, an unprivileged account (the `look` account) and one key line for the gateway's public key that starts with `restrict` and has no forced command (a forced command would stop the gateway from signalling a command, so `kill_command` could not work). The key line goes in a file owned by root, outside the account's home, that the SSH daemon's configuration names for that account (`AuthorizedKeysFile` in a `Match User` block, checked with `sshd -t` before the reload); the account's own `~/.ssh/authorized_keys` is then not consulted. The account must not be able to change which keys log in as it: any command the assistant runs as that account could otherwise add a key or remove `restrict`, opening a login that never passes the edge, the token check or the audit log. [deploy/README.md](../deploy/README.md) has the exact steps, and MT-002 checks that the account cannot write the file.
+2. The target's host key, as one line. Get it from the target itself (the `.pub` file of the host key it serves, read over a channel you trust) or from `ssh-keyscan` and compare its fingerprint with the one the target reports (the scanned line starts with the host name: drop it for `host_key`, or name the scanned file in `known_hosts_file`, and only after the fingerprint matched). Never accept what a first connection shows: a gateway that pins an unknown key can be pointed at an impostor.
 3. The gateway's private key for that account, generated on the gateway host.
 
 In the config: an `identities` entry (the account name and the key file), a `servers` entry that names that identity and carries `host_key` (or a `known_hosts_file`), and `access: look`. Run `yasshm config check`, restart the service, and ask the assistant to call `get_server_info` for the new server: `reachable`, `host_key_ok` and a few facts (kernel, architecture, OS, uptime) come back. A target whose host key is not the pinned one is never spoken to past the handshake: the call fails with `host_key_mismatch` and the mismatch is in the audit log. After a legitimate host key change (a reinstall), replace `host_key` with the new line after checking it, and restart.
@@ -155,13 +155,13 @@ A command record has one of seven statuses. `running` is the only one a record l
 
 ## Running, upgrading and rolling back
 
-**Start and stop.** `systemctl start yasshm` runs `yasshm config check` first and starts the gateway only if it passes; a config problem shows in `journalctl -u yasshm` as one `config problem` line per problem. A stop is graceful: on `SIGTERM` the gateway stops accepting, ends the running commands (they are marked `killed`) within `shutdown_grace_seconds`, writes `gateway.stopped` and exits 0. A second signal exits at once. The unit's `TimeoutStopSec` is longer than the largest allowed grace.
+**Start and stop.** `systemctl start yasshm` runs `yasshm config check` first and starts the gateway only if it passes; a config problem shows in `journalctl -u yasshm` as the plain lines `config check` prints, `path.to.key: message (line N)`, one per problem (when `serve` is run by hand, as `config problem` JSON lines). A stop is graceful: on `SIGTERM` the gateway stops accepting, ends the running commands (they are marked `killed`) within `shutdown_grace_seconds`, writes `gateway.stopped` and exits 0. A second signal exits at once. The unit's `TimeoutStopSec` is longer than the largest allowed grace.
 
 **A restart ends running commands.** A command is a child of the gateway's SSH connection. After a stop they are `killed`; if the gateway dies instead (a crash, a power cut), the next start marks every `running` record `lost`, and a lost record says the remote process may still be running, because nobody stopped it. See [what "may still be running" means](#may-still-be-running).
 
 **Upgrade.**
 
-1. Download the new release files and `SHA256SUMS`, and verify them (`sha256sum --check --ignore-missing SHA256SUMS`).
+1. Download the new release files and `SHA256SUMS`, and verify them (`sha256sum --check --ignore-missing SHA256SUMS`). A release carries its version without the `v` of the tag: the tag `v0.1.0` gives `yasshm_0.1.0_linux_amd64` and `yasshm version` prints `yasshm 0.1.0`; a local `mise run build` carries `git describe --tags --always --dirty`.
 2. Read the changelog. Back up the data directory if you want the old command records back after a rollback (`systemctl stop yasshm`, copy `/var/lib/yasshm`, keep its modes).
 3. Install the new binary over `/usr/local/bin/yasshm` and run `yasshm config check --config /etc/yasshm/config.yaml` with the new binary.
 4. `systemctl restart yasshm`. Check `journalctl -u yasshm` for `listening` and `readiness`, `/healthz`, and the `gateway.started` event with the new `version`.
@@ -170,7 +170,23 @@ The gateway is down from the stop to the start, and while it is down the loopbac
 
 **Roll back.** Reinstall the previous binary and restart. The database schema moves forward only: a binary that finds a database newer than it understands refuses to start with `the database was written by a newer yasshm`. Then restore the data directory from the backup you took before the upgrade (you lose the command records written since), or keep the new binary.
 
-**Uninstall.** Stop and disable the unit, remove the unit file, the binary and `/etc/yasshm`, and decide what to do with `/var/lib/yasshm` (command output, possibly with secrets from targets) and `/var/log/yasshm` (the audit log). Remove the gateway's public key from every target's `authorized_keys`, delete the target accounts if you made them for this, and remove the tunnel route and the Access application.
+**Uninstall.** Stop and remove the service, then decide deliberately about what it leaves:
+
+```sh
+systemctl disable --now yasshm
+rm /etc/systemd/system/yasshm.service /usr/local/bin/yasshm
+systemctl daemon-reload
+```
+
+Remove the gateway's public key from every target's key file and delete the `look` accounts you made for it; remove the tunnel route and the Access application. Keep or destroy `/var/log/yasshm` (the record of what was done), and destroy `/var/lib/yasshm` (captured output, which can hold secrets) and `/etc/yasshm` (the private keys) with the care you give any secret. `userdel yasshm` last.
+
+## Releases
+
+This part is for whoever cuts a release. A release is made by pushing a tag named `v<version>` (for example `v0.1.0`): `.github/workflows/release.yml` runs the gate, builds the two binaries and `SHA256SUMS` with `VERSION` set to the tag without its `v`, and attaches them to a GitHub release. The tag is pushed by hand, after the manual tests in `test/manual` pass against a real deployment (a failed manual test refuses the tag).
+
+**Before the first release, protect the repository.** The workflow checks that the tagged commit is on the default branch, and that prevents a mistake. It does not prevent misuse by someone who can push tags: a tag push runs the workflow file of the tagged commit, so a commit that is not on the default branch can carry a copy of the workflow without the check, and that job holds `contents: write`. So, in the repository's settings, add a ruleset for tags matching `v*` that limits creating, updating and deleting them to the repository admin, protect the default branch (no force pushes, no deletion, a pull request required), and turn on immutable releases if the repository offers them. The same list is in [SECURITY.md](../SECURITY.md#releases).
+
+**A failed release job.** `gh release create` fails when the release already exists, so re-running the job after it created the release (or part of it) fails. Delete the release in GitHub (a draft too), then re-run the job. Do not move or re-push the tag.
 
 ## The data directory and retention
 
@@ -253,7 +269,7 @@ The limits are under each tenant's `limits` (see the table above). Some of them 
 
 - **The maximum wait and the connect timeout.** A tool call is answered with plain JSON, and only when it is done, so nothing travels on the connection while `run_command` or `read_output` waits. The edge closes a request whose origin sends nothing for 125 seconds, and the client gives up on a tool call after 240 (see [Connecting a Claude custom connector](#connecting-a-claude-custom-connector)). `run_command` also connects and waits for the exec reply before its wait (each bounded by `connect_timeout_seconds`), so its longest answer is `max_wait_seconds` plus twice `connect_timeout_seconds`. The config therefore keeps `max_wait_seconds` at 110 or below and that sum at 120 or below; the defaults give 80. Raising either past the sum is refused at start.
 - **A command may run far longer than a wait.** `timeout_seconds` (default 600, at most `max_timeout_seconds`) is how long the command may run; `wait_seconds` is only how long one call waits for it. A command that is still running when the wait ends keeps running and the answer says `running`; the assistant pages it with `read_output` and stops it with `kill_command`.
-- **Concurrency.** `max_concurrent_commands` bounds commands per tenant (one SSH connection each, no pooling) and `max_concurrent_per_server` bounds commands, probes and transfers on one server. There is no queue: over a limit the call is refused with `busy` and the message names the limit. The gateway also caps concurrent `/mcp` requests at 8 plus 4 per `max_concurrent_commands` (at most 1024), and one principal at most three quarters of that; over the cap a request gets 503 with `Retry-After: 5`.
+- **Concurrency.** `max_concurrent_commands` bounds commands per tenant (one SSH connection each, no pooling) and `max_concurrent_per_server` bounds commands on one server and, as a separate count of the same size, probes and file transfers on one server (so one server can hold twice the limit in SSH connections). There is no queue: over a limit the call is refused with `busy` and the message names the limit. The gateway also caps concurrent `/mcp` requests at 8 plus 4 per `max_concurrent_commands` (at most 1024), and one principal at most three quarters of that; over the cap a request gets 503 with `Retry-After: 5`.
 - **Result size.** `max_result_bytes` (default 100000, at most 140000) keeps a tool result under the client's cap of about 150,000 characters with room for the rest of the answer. A larger output is paged: continue from `next_offset` until `eof`.
 - **Request bodies** are capped at 2 MiB, header reads time out at 10 seconds and idle connections at 120 seconds.
 
@@ -272,7 +288,7 @@ A failed tool call is a result with `isError: true` and one text block holding o
 | `policy_denied` | The command or path hit a guard rail. `rule` names it. | Rephrase. If a built-in rule is wrong for you, remember it is a guard rail and the target account is the boundary; your own `deny_commands` and `deny_paths` entries show as `config:deny_commands[n]`. |
 | `busy` | A limit is reached; the message names it: `max_concurrent_commands`, `max_concurrent_per_server` or `max_data_bytes`. There is no queue. | Wait for a command to finish, `kill_command`, or raise the limit. For `max_data_bytes`, lower `retention_days` or raise the quota. |
 | `ssh_unreachable` | The dial or the SSH handshake failed or timed out, or the connection was lost while a command ran. | `get_server_info` shows `reachable: false`. From the gateway host check DNS, routing, the target's port and firewall. The target's `sshd` log shows what it saw. |
-| `ssh_auth_failed` | The target refused the gateway's key. | Check the `authorized_keys` line on the target (the right account, the right public key, `restrict`), the account name in `identities`, and that the account is not locked. |
+| `ssh_auth_failed` | The target refused the gateway's key. | Check the key file on the target that `AuthorizedKeysFile` names for the account (the right public key, `restrict`, owned by root and not writable by others), the account name in `identities`, and that the account is not locked: on a target whose `sshd` runs with `UsePAM no`, a password field that starts with `!` refuses key logins (use `usermod -p '*'`, not a lock). |
 | `host_key_mismatch` | The target's host key is not the pinned key, or no key can be pinned for it. Nothing past the handshake was sent. | Find out why before changing anything: a reinstalled target, or an impostor. If legitimate, verify the new key out of band and replace `host_key`. |
 | `timeout` | A probe or a file transfer passed its deadline (`connect_timeout_seconds` plus 20 or 30 seconds). A command that outlives its own timeout is not this code: it ends with status `timed_out`. | Retry, or check the target's load and network. For a large file, download in pages with `offset` and `max_bytes`. |
 | `internal` | A fault of the gateway: the audit log could not be written (`the audit log could not be written, so nothing was done`), the gateway is stopping (`shutting down, retry later`), a disk error on an output file, or a recovered panic. | Look at the journal and the disks. After an audit write failure the gateway needs a restart (see [The audit log](#the-audit-log)). |
@@ -302,11 +318,11 @@ What to do: look on the target. Use the command text from `list_commands` or the
 | 405 | `{"error":"method not allowed"}` | `/healthz` with a method other than `GET` or `HEAD`. (`/mcp` answers `GET` and `DELETE` with 405 from the MCP library: this server is stateless.) |
 <!-- http-statuses:end -->
 
-`GET /healthz` answers `{"status":"ok","version":"..."}` with 200 once the key set is loaded, and `{"status":"degraded","detail":"key set not loaded","version":"..."}` with 503 while it is not (every `/mcp` request is refused meanwhile). It says nothing else. The key set is fetched at start, refreshed every hour (every minute after a failed fetch) and refetched, at most once a minute, when a token names an unknown key. If `degraded` persists: from the gateway host, can it reach `https://<team domain>/cdn-cgi/access/certs`? Is `team_domain` right? The journal has `key set fetch failed` with a reason.
+`GET /healthz` answers `{"status":"ok","version":"..."}` with 200 once the key set is loaded, and `{"status":"degraded","detail":"key set not loaded","version":"..."}` with 503 while it is not (every `/mcp` request is refused meanwhile). It says nothing else. The key set is fetched at start, refreshed every hour (every minute after a failed fetch) and refetched, at most once a minute, when a token names an unknown key. A failed fetch keeps the last good keys for at most seven days after the last successful fetch; after that every request is refused with 503 until a fetch succeeds. If `degraded` persists: from the gateway host, can it reach `https://<team domain>/cdn-cgi/access/certs`? Is `team_domain` right? The journal has `key set fetch failed` with a reason.
 
 ### The gateway will not start
 
-Each failure is one `start-up failed` line with a fixed reason, and nothing is served.
+Each failure but the last row is one `start-up failed` line with a fixed reason, and nothing is served.
 
 | Reason | What to check |
 |---|---|
@@ -321,6 +337,7 @@ Each failure is one `start-up failed` line with a fixed reason, and nothing is s
 | `the MCP endpoint cannot be built` | A limit out of its range, such as `max_result_bytes` under 4096. |
 | `the listen address cannot be bound` | That nothing else holds the port. A local user holding it is a security problem (see [Operational notes](#operational-notes)). |
 | `gateway.started cannot be written to the audit log` | The audit log's disk and permissions. |
+| (the unit's first start) no `start-up failed` line, but the unit fails at once, or an `operation not permitted` error appears after `listening` or while the key set is fetched | The unit has never been started under a real systemd in this project's tests, so look here first. A status of 226/NAMESPACE means a `ReadWritePaths` directory is missing. An `operation not permitted` error means a system call the filter denies (the filter returns an error and does not kill the gateway): comment out the two `SystemCallFilter` lines in the unit, restart to confirm, and report which call it was. DNS or egress to the key-set host shows as `key set fetch failed` with a reason, and `/healthz` reads `degraded`. |
 
 If the service does not even reach `ExecStart`, `ExecStartPre` (`yasshm config check`) failed; its output is in the journal. A unit that fails at once with a namespace error usually has a `ReadWritePaths` directory that does not exist.
 

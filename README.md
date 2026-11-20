@@ -41,7 +41,7 @@ The eight tools:
 
 The denylist is a guard rail, not a sandbox: what a command can change is decided by the account it runs as. Read the security model in the spec (section 6) before pointing this at a machine you care about.
 
-What v0.1 does not guarantee (spec section 6): that a command at `look` changes nothing (the target account decides that); that the denylist cannot be bypassed; that output is free of secrets (captured output is stored under the data directory and returned to the assistant as it is, so whatever a command prints from the target, a secret included, goes both places); availability under a request flood from a host that can reach the loopback listener (rejections are answered and their audit lines are bounded: at most 60 a minute for tokens without a verified signature and 60 for verified tokens that are not valid here, plus one summary line each; but nothing limits the request rate; the edge stops a flood from the internet); that text returned from a target is safe for a model to act on (a hostile target can put instructions in its output; the tool descriptions label output as untrusted); and that another local user cannot take the loopback port while the gateway is down and receive what the edge forwards (run it on a host with no untrusted local users; a Unix-socket listener is future work).
+What v0.1 does not guarantee (spec section 6): that a command at `look` changes nothing; that the denylist cannot be bypassed; that output is free of secrets; availability under a request flood; that text returned from a target is safe for a model to act on (the tool descriptions label output as untrusted); and that another local user cannot take the loopback port while the gateway is down. [The operator guide](docs/operator-guide.md#what-yasshm-is-not) says what to do about each.
 
 ## Develop
 
@@ -54,33 +54,39 @@ mise run check
 
 ## Quick start
 
-This runs the gateway on your own machine, on loopback, with a made-up target. It shows the build, the config check and the health endpoint; it cannot show a tool call, because every request to `/mcp` must carry a Cloudflare Access token for your team domain and audience, which only the real edge issues. A tool call is exercised by the test suites (through a local token issuer and a stand-in edge) and, for real, by the manual tests.
+This runs the gateway on your own machine, on loopback, with a made-up target, and nothing in it leaves loopback: the config points the key-set URL at an unused loopback port, so the gateway fetches nothing from the internet. It shows the build, the config check and the health endpoint; it cannot show a tool call, because every request to `/mcp` must carry a Cloudflare Access token for your team domain and audience, which only the real edge issues. A tool call is exercised by the test suites (through a local token issuer and a stand-in edge) and, for real, by the manual tests.
 
 You need `scripts/bootstrap.sh` run once (it installs `mise` and the pinned Go), and `ssh-keygen` for the throwaway keys.
 
 ```sh
 mise run build                       # dist/yasshm_<version>_linux_{amd64,arm64} and dist/SHA256SUMS
-B=$(ls dist/yasshm_*_linux_amd64)    # use the _arm64 file on an arm64 machine
+B=$(ls $PWD/dist/yasshm_*_linux_amd64)   # use the _arm64 file on an arm64 machine
 $B version
 
-T=/tmp/yasshm-try
+T=$(mktemp -d)
 mkdir -p $T/data $T/logs $T/keys && chmod 700 $T/data $T/logs
 ssh-keygen -q -t ed25519 -N '' -f $T/keys/lab-look_ed25519
 ssh-keygen -q -t ed25519 -N '' -f $T/fake-host                  # any public key line will do for a local try
 sed -e "s|/etc/yasshm/keys|$T/keys|" -e "s|/var/lib/yasshm|$T/data|" -e "s|/var/log/yasshm|$T/logs|" \
-    -e "s|\"ssh-ed25519 REPLACE_WITH_THE_TARGETS_HOST_KEY_LINE_FROM_ssh-keyscan_OR_THE_HOST\"|\"$(cut -d' ' -f1,2 $T/fake-host.pub)\"|" \
+    -e "s|REPLACE_WITH_YOUR_TEAM.cloudflareaccess.com|example-team.cloudflareaccess.com|" \
+    -e "s|REPLACE_WITH_THE_ACCESS_APPLICATION_AUD_TAG|an-example-audience|" \
+    -e "s|REPLACE_WITH_YOUR_EMAIL@example.net|operator@example.net|" \
+    -e "s|REPLACE_WITH_THE_TARGET_HOST.example.net|lab-1.example.net|" \
+    -e "s|^    # certs_url: https://example.net/certs\$|    certs_url: http://127.0.0.1:1/certs|" \
+    -e "s|\"ssh-ed25519 REPLACE_WITH_THE_HOST_KEY_READ_ON_THE_TARGET\"|\"$(cut -d' ' -f1,2 $T/fake-host.pub)\"|" \
     deploy/config.example.yaml > $T/config.yaml
 chmod 600 $T/config.yaml
 
 $B config check --config $T/config.yaml     # config ok: 1 tenant, 1 server
 $B serve --config $T/config.yaml 2>$T/serve.log &
-curl -s http://127.0.0.1:8822/healthz       # see below
+for i in $(seq 50); do curl -s -o /dev/null http://127.0.0.1:8822/healthz && break; sleep 0.2; done   # wait for the port
+curl -s http://127.0.0.1:8822/healthz       # {"status":"degraded",...} with status 503, see below
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8822/mcp   # 401: no token
 kill -TERM %1                               # graceful stop; gateway.stopped is the last audit event
 cat $T/serve.log $T/logs/audit.jsonl
 ```
 
-With the example's made-up team domain the gateway cannot fetch Access's signing keys (it tries `https://example-team.cloudflareaccess.com/cdn-cgi/access/certs`), so `/healthz` answers `{"status":"degraded","detail":"key set not loaded","version":"..."}` with status 503 and `/mcp` refuses every request. With your real team domain and the Access application's AUD tag in the config, and a host that can reach the key set, `/healthz` answers `{"status":"ok","version":"..."}`. The version is what the binary was stamped with: the short commit for a `mise run build` binary, the tag for a release, `dev` for `go run`. To go on, follow [deploy/README.md](deploy/README.md).
+The key-set URL (`certs_url`) is a test setting; the gateway logs a warning about it. Because nothing answers there, the gateway cannot load Access's signing keys, so `/healthz` reads `{"status":"degraded","detail":"key set not loaded","version":"..."}` with status 503 and `/mcp` refuses every request without a token (401). With your real team domain and the Access application's AUD tag in the config, no `certs_url`, and a host that can reach the key set, `/healthz` answers `{"status":"ok","version":"..."}`. The version is what the binary was stamped with: for a release the version without its `v` (`0.1.0`, in a file named `yasshm_0.1.0_linux_amd64`), for a local `mise run build` the output of `git describe --tags --always --dirty`, `dev` for `go run`. To go on, follow [deploy/README.md](deploy/README.md).
 
 ## Architecture
 

@@ -154,18 +154,6 @@ func TestUnitNoIPAddressDeny(t *testing.T) {
 	}
 }
 
-// TestUnitIsASCII: the unit is a tracked text file like the docs.
-func TestUnitIsASCII(t *testing.T) {
-	_, text := readUnit(t)
-	for i, line := range strings.Split(text, "\n") {
-		for _, r := range line {
-			if r > 126 || (r < 32 && r != '\t') {
-				t.Fatalf("line %d holds a non-ASCII or control character %U", i+1, r)
-			}
-		}
-	}
-}
-
 // TestParseUnit proves the parser rejects what it cannot read.
 func TestParseUnit(t *testing.T) {
 	u := parseUnit(t, "# c\n[A]\nk=v\nk=w\n; c\n[B]\nz=\n")

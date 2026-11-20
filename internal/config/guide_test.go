@@ -1,16 +1,14 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
-)
 
-var guidePath = filepath.Join("..", "..", "docs", "operator-guide.md")
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/guidedoc"
+)
 
 // guideRow is one row of the operator guide's config reference table.
 type guideRow struct {
@@ -20,18 +18,7 @@ type guideRow struct {
 // guideRows reads the rows between the config-reference markers.
 func guideRows(t *testing.T) []guideRow {
 	t.Helper()
-	b, err := os.ReadFile(guidePath) //nolint:gosec // G304: a fixed repository path
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(string(b), "<!-- config-reference:begin -->")
-	if !ok {
-		t.Fatal("no config-reference:begin marker in the operator guide")
-	}
-	body, _, ok := strings.Cut(rest, "<!-- config-reference:end -->")
-	if !ok {
-		t.Fatal("no config-reference:end marker in the operator guide")
-	}
+	body := guidedoc.Block(t, "config-reference")
 	var rows []guideRow
 	for _, l := range strings.Split(body, "\n") {
 		if !strings.HasPrefix(l, "| `") {
@@ -119,7 +106,7 @@ func TestGuideConfigReference(t *testing.T) {
 		// "is required" when it is absent from the otherwise valid example.
 		text := readExample(t)
 		k := genKeys(t)
-		filled := strings.NewReplacer(placeholderHostKey, `"`+k.hostKey+`"`, placeholderKeyFile, k.keyFile).Replace(text)
+		filled := fillExample(text, k)
 		for _, tc := range []struct{ path, line string }{
 			{"server.listen", "  listen: 127.0.0.1:8822\n"},
 			{"server.data_dir", "  data_dir: /var/lib/yasshm\n"},

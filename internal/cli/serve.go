@@ -36,7 +36,9 @@ exit). Logs are JSON lines on stderr.
 const readyPoll = time.Second
 
 // httpCloseWait bounds the wait for in-flight requests after the engine has
-// shut down: their commands are gone, so they answer at once.
+// shut down: their commands are gone, so they answer at once. The systemd
+// unit's TimeoutStopSec must exceed the largest shutdown_grace_seconds plus
+// this (deploy/yasshm.service; TestUnitStopTimeout reads this line).
 const httpCloseWait = 5 * time.Second
 
 // runServe is the serve subcommand with the process's signals: the first
@@ -64,15 +66,18 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	return Serve(ctx, args, stdout, stderr)
 }
 
-// hupLine is the log line written for every SIGHUP.
-const hupLine = `{"level":"WARN","msg":"SIGHUP ignored: the gateway reopens no files; rotate the audit log by copy and truncate","version":%q}` + "\n"
+// hupMessage is the log message written for every SIGHUP.
+const hupMessage = "SIGHUP ignored: the gateway reopens no files; rotate the audit log by copy and truncate"
 
-// ignoreHangups writes hupLine for each SIGHUP until stop is closed.
+// ignoreHangups writes hupMessage, through the same logger as every other
+// line (so it has a time and the version), for each SIGHUP until stop is
+// closed.
 func ignoreHangups(ch <-chan os.Signal, stop <-chan struct{}, stderr io.Writer) {
+	log := slog.New(slog.NewJSONHandler(stderr, nil)).With("version", Version)
 	for {
 		select {
 		case <-ch:
-			_, _ = fmt.Fprintf(stderr, hupLine, Version)
+			log.Warn(hupMessage)
 		case <-stop:
 			return
 		}

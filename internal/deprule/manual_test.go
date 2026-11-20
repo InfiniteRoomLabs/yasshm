@@ -59,6 +59,32 @@ func allTestNames(t *testing.T) map[string]bool {
 	return out
 }
 
+// joinMarkers are phrases that, outside a code span, join two actions in one
+// Do line. This is a heuristic: it catches the common forms ("A, then B",
+// "A and then B", "A; B", "A. Then B") and cannot know in general that a
+// sentence holds two actions, so the review of a new manual test still reads
+// every Do line for "and".
+var joinMarkers = []string{" and then ", ", then ", "; ", ". Then "}
+
+var codeSpanText = regexp.MustCompile("`[^`]*`")
+
+// joinedActions returns the first join marker found in the Do line of a step
+// block (code spans removed), or "".
+func joinedActions(block string) string {
+	for _, l := range strings.Split(block, "\n") {
+		if !strings.HasPrefix(l, "Do (") {
+			continue
+		}
+		plain := codeSpanText.ReplaceAllString(l, "")
+		for _, m := range joinMarkers {
+			if strings.Contains(plain, m) {
+				return strings.TrimSpace(m)
+			}
+		}
+	}
+	return ""
+}
+
 // manualProblems returns what is wrong with one manual-test script, in the
 // agent-ops manual-test format.
 func manualProblems(name, id, text string, tests map[string]bool) []string {
@@ -130,6 +156,9 @@ func manualProblems(name, id, text string, tests map[string]bool) []string {
 		}
 		if strings.Count(block, "\nDo (") != 1 {
 			add("a step has more than one action: %q", strings.SplitN(block, "\n", 2)[0])
+		}
+		if joined := joinedActions(block); joined != "" {
+			add("a Do line joins actions (%s): %q", joined, strings.SplitN(block, "\n", 2)[0])
 		}
 	}
 	// The live budget names the number of live steps.
@@ -245,6 +274,14 @@ func TestManualTests(t *testing.T) {
 		}
 		if got := manualProblems("MT-009-x.md", "009", "# MT-009 -- x \u2014\n", tests); len(got) == 0 {
 			t.Fatal("a non-ASCII script passed")
+		}
+		for _, joined := range []string{"Do (manual): Restart it and then check.", "Do (manual): Restart it, then check.", "Do (manual): Restart it; check.", "Do (manual): Restart it. Then check."} {
+			if joinedActions("### 1. x\n"+joined+"\nExpect: y\n") == "" {
+				t.Errorf("not flagged: %q", joined)
+			}
+		}
+		if joinedActions("### 1. x\nDo (Bash): `a; b`\nExpect: y\n") != "" {
+			t.Error("a semicolon inside a code span was flagged")
 		}
 	})
 }

@@ -39,6 +39,11 @@ const MaxFileBytes = 1 << 20
 // ProviderCloudflareAccess is the only auth provider in v0.1.
 const ProviderCloudflareAccess = "cloudflare-access"
 
+// PlaceholderPrefix starts every value of deploy/config.example.yaml that the
+// operator must replace; the loader refuses a string value that still starts
+// with it ("replace the placeholder value").
+const PlaceholderPrefix = "REPLACE_"
+
 // DefaultSSHPort is the port of a server that does not name one.
 const DefaultSSHPort = 22
 

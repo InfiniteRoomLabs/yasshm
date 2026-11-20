@@ -37,7 +37,7 @@ The unit names `/var/lib/yasshm` and `/var/log/yasshm` in `ReadWritePaths` and d
 
 ## 2. The binary, from a release, with its checksum verified
 
-A release has two files per architecture, `yasshm_<version>_linux_amd64` and `yasshm_<version>_linux_arm64`, and `SHA256SUMS`. Download the file for your host (`uname -m` says `x86_64` for amd64 and `aarch64` for arm64) and `SHA256SUMS` from the same release into an empty directory, then:
+A release has two files, `yasshm_<version>_linux_amd64` and `yasshm_<version>_linux_arm64`, and `SHA256SUMS`; the version has no leading `v` (the tag `v0.1.0` gives `yasshm_0.1.0_linux_amd64`, and `yasshm version` prints `yasshm 0.1.0`). Download the file for your host (`uname -m` says `x86_64` for amd64 and `aarch64` for arm64) and `SHA256SUMS` from the same release into an empty directory, then:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
@@ -65,15 +65,42 @@ Make an account that can do only what you are willing to let an assistant do. Th
 
 ```sh
 useradd --create-home --shell /bin/bash look
-passwd --lock look
-install -d -m 0700 -o look -g look /home/look/.ssh
+usermod -p '*' look
 ```
 
-Keep it out of every privileged group (`root`, `sudo`, `wheel`, `adm`, `docker`, `disk`, `shadow` and the like) and give it no `sudo` rights. Then add one line to `/home/look/.ssh/authorized_keys` (mode 0600, owner `look`) with the public key from step 3:
+`usermod -p '*'` leaves no password that can match, so there is no password login, and it does not lock the account (a locked account refuses key logins on a target whose `sshd` runs with `UsePAM no`). Keep the account out of every privileged group (`root`, `sudo`, `wheel`, `adm`, `docker`, `lxd`, `libvirt`, `kvm`, `disk`, `shadow` and the like) and give it no `sudo` rights.
+
+**The account must not be able to change which keys log in as it.** Any command the assistant runs as that account could otherwise add a key to its own `~/.ssh/authorized_keys` or remove `restrict`, and that opens a login that never passes the edge, the token check or the audit log. So keep the gateway's key in a file owned by root, outside the account's home, and tell `sshd` to read that file for that account only; the account's own `~/.ssh/authorized_keys` is then not consulted. As root on the target:
+
+```sh
+install -d -m 0755 -o root -g root /etc/ssh/authorized_keys
+install -m 0644 -o root -g root /dev/null /etc/ssh/authorized_keys/look
+$EDITOR /etc/ssh/authorized_keys/look        # the one line below
+```
+
+with the public key from step 3 and nothing else on the line but `restrict` before it:
 
 ```text
 restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEONLYEXAMPLEONLYEXAMPLEONLYEXAMPLEONLY00 yasshm gateway
 ```
+
+Then name the file in the SSH daemon's configuration, in a `Match User` block. Put the block at the end of `/etc/ssh/sshd_config` (a `Match` block runs to the next `Match` or the end of the file, so nothing may follow it that is meant for everyone), or in a drop-in file that your `sshd_config` includes at its end:
+
+```text
+Match User look
+    AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+```
+
+Check the configuration before you reload it, and check what it says for this account and for another:
+
+```sh
+sshd -t
+sshd -T -C user=look,host=lab-1.example.net,addr=192.0.2.10 | grep -i '^authorizedkeysfile'
+sshd -T -C user=nobody,host=lab-1.example.net,addr=192.0.2.10 | grep -i '^authorizedkeysfile'
+systemctl reload ssh        # the unit is called sshd on some distributions
+```
+
+The first `grep` must show `/etc/ssh/authorized_keys/%u` and the second the default. (`sshd -t` prints nothing when the file is valid.) Keep the directory and the file owned by root and not writable by anyone else: `sshd` refuses a key file that others can write, and an account that could write it could undo all of this. MT-002 checks that the `look` account cannot.
 
 - `restrict` turns off port forwarding, agent forwarding, X11 forwarding and the terminal in one word. The gateway uses none of them.
 - **No forced command.** Do not add `command="..."`. The gateway signals a running command with an SSH `signal` request, and `sshd` does not deliver a signal to a session that runs under a forced command, so `kill_command` and timeouts could not stop anything.
@@ -98,7 +125,7 @@ ssh-keyscan -t ed25519 -p 22 lab-1.example.net > /tmp/lab-1.pub
 ssh-keygen -lf /tmp/lab-1.pub
 ```
 
-Paste the line (type and base64; a trailing comment is dropped) into the server's `host_key`, or put the lines in a `known_hosts` file and name it in `known_hosts_file`. A target that later presents another key is never spoken to: the call fails with `host_key_mismatch`.
+`ssh-keyscan` writes the host name first (`lab-1.example.net ssh-ed25519 AAAA...`); that is a `known_hosts` line, not a `host_key` value. Once the fingerprint matches the one you read on the target, either drop the host name and paste the rest (type and base64; a trailing comment is dropped) into the server's `host_key`, or name the scanned file in `known_hosts_file`. For a key read on the target, paste the same type and base64 into `host_key`. A target that later presents another key is never spoken to: the call fails with `host_key_mismatch`.
 
 ## 6. The config
 
@@ -107,7 +134,7 @@ install -m 0640 -o root -g yasshm config.example.yaml /etc/yasshm/config.yaml
 $EDITOR /etc/yasshm/config.yaml
 ```
 
-Replace the values marked REPLACE: the AUD tag of your Access application and the team domain (step 8 says where they come from), your email in `principals`, the identity's `user` and `private_key_file`, and each server's `host`, `host_key` and `identity`. The comments in the file give each key's meaning, default and range; the operator guide has them as a table. Then check it as the service user, the way the unit does:
+Replace every value that starts with `REPLACE_`: the AUD tag of your Access application and the team domain (step 8 says where they come from), your email in `principals`, and each server's `host` and `host_key` (a host key placeholder is `ssh-ed25519 REPLACE_...`). The loader refuses a value that still starts with `REPLACE_`, with `replace the placeholder value`. Also set the identity's `user` and `private_key_file`, and each server's `identity`. The comments in the file give each key's meaning, default and range; the operator guide has them as a table. Then check it as the service user, the way the unit does:
 
 ```sh
 sudo -u yasshm /usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml
@@ -133,6 +160,8 @@ curl -s http://127.0.0.1:8822/healthz
 
 It answers `{"status":"ok","version":"..."}` once the key set is loaded and `{"status":"degraded","detail":"key set not loaded","version":"..."}` with status 503 before. A tool call needs a real Access token, so there is nothing more to try from the shell: a request to `/mcp` without one gets 401.
 
+**The unit has not been started under a real systemd yet.** `systemd-analyze verify` checks its syntax and the build checks its directives, but nobody has run it: the first start is yours, and it is the place a hardening directive is most likely to bite (a missing `ReadWritePaths` directory, or a system call the filter denies, which shows in the journal as an `operation not permitted` error). The [operator guide](../docs/operator-guide.md#the-gateway-will-not-start) says what to look at.
+
 The unit passes no `MCPGODEBUG` or any other environment variable, and it should stay that way: the MCP library reads `MCPGODEBUG` at start and a malformed value stops the process. The unit leaves `IPAddressDeny` out because the gateway must reach every target and the edge's key-set host; a commented example with the allow list you would need is inside the unit.
 
 ## 8. The edge
@@ -147,21 +176,6 @@ The gateway listens on `127.0.0.1` only. The edge reaches it through a tunnel co
 
 Then run the manual tests in [test/manual](../test/manual) (see [TESTING.md](../TESTING.md)): they are the check that the edge, the Access policy and a real target behave as this document says.
 
-## Upgrade and rollback
+## Upgrade, rollback and uninstall
 
-1. Download and verify the new files as in step 2. Read `CHANGELOG.md`.
-2. Back up `/var/lib/yasshm` if you want the old command records after a rollback: `systemctl stop yasshm`, copy the directory with its modes (`cp -a`), keep it private.
-3. Install the new binary over `/usr/local/bin/yasshm`, run `config check` with it, then `systemctl restart yasshm` (or `start`, if you stopped it).
-4. Look for `listening` and `readiness` in the journal, `/healthz`, and a `gateway.started` event with the new `version` in the audit log.
-
-A stop ends running commands (they become `killed`), and the loopback port is free while the gateway is down, which is one more reason for a host with no untrusted local users. To roll back, reinstall the previous binary and restart. If it refuses to start with `the database was written by a newer yasshm`, the new version changed the database: restore the backup from step 2 (the command records since are lost) or go back to the new binary. The audit log is never touched by an upgrade.
-
-## Uninstall
-
-```sh
-systemctl disable --now yasshm
-rm /etc/systemd/system/yasshm.service /usr/local/bin/yasshm
-systemctl daemon-reload
-```
-
-Then, deliberately: remove the gateway's public key from every target's `authorized_keys` and delete the `look` accounts you made for it; remove the tunnel route and the Access application; keep or destroy `/var/log/yasshm` (the record of what was done) and destroy `/var/lib/yasshm` (captured output, which can hold secrets) and `/etc/yasshm` (the private keys) with the care you give any secret. `userdel yasshm` last.
+They are in the [operator guide](../docs/operator-guide.md#running-upgrading-and-rolling-back), which also covers the data directory, the audit log and the release process.

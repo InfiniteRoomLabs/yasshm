@@ -2,7 +2,7 @@
 
 Added in 0.1 for spec section 7; the offline half is `TestE2ELostAfterKill` in `test/e2e` (the gateway killed with SIGKILL, restarted on the same data directory) and `internal/jobs` `TestRecover`. A plain `systemctl restart` is a graceful stop and records the command as `killed` (`TestE2EGracefulShutdown`), so this test ends the gateway the way a crash does.
 
-- **Runner:** a Claude Code session with the yasshm connector registered as an MCP server, plus a human on the gateway host and on the target. Steps 3, 4, 6 and 7 are manual (the kill, the wait for the restart and the process list on the target).
+- **Runner:** a Claude Code session with the yasshm connector registered as an MCP server, plus a human on the gateway host and on the target. Steps 3, 4, 6, 7 and 8 are manual (the kill, the wait for the restart and the process list on the target). The runner's client must show each tool result's structured content (`structuredContent`): the `jq` steps read it, and a client that shows only the text blocks (a gateway header and raw output, not JSON) cannot run them, which is BLOCKED with note `no_structured_content`, noticed at the first tool step (the first live call is then spent: `live` says so).
 - **Placeholders:** `<server-id>` -- `MT_SERVER_ID`, the id of the real target's server entry. The value lives in the gitignored `mise.local.toml` `[env]` block, is a common word and is caught by the run-time oracle only, and never appears in a committed file. Run value, never recorded or committed: `<command-id>`, the `command_id` of step 2.
 - **Live budget:** 2 tool calls (steps 2 and 5), 0 navigations, so `live=2`. No retries, no polling, no loops. Do not call any other tool inside a run. A BLOCKED because the service did not come back is cleared between runs by the human (start it, read the journal), and the next run is a new line; a command left running on the target is ended there by the human (step 7).
 - **Automate when:** a throwaway target and a real systemd unit can be run in CI (a container with systemd and an `sshd`). The gateway's crash recovery is automated against the real binary; what blocks this test is the real unit's restart behaviour (`Restart=on-failure` after a SIGKILL) and a real target.
@@ -40,9 +40,14 @@ Do (manual): On the target, as any account, run `pgrep -f yasshm-mt004-marker`.
 Expect: yes or no: does it print a pid? Either answer passes; it is recorded because "lost" means nobody stopped the remote process, and this is the one place that shows what an `sshd` does when the connection drops.
 Record: `remote=running` or `remote=gone`
 
-### 7. Clean up the target
-Do (manual): On the target, as the same account that runs the commands, run `pkill -f yasshm-mt004-marker`, then `pgrep -f yasshm-mt004-marker` again.
-Expect: yes or no: does the second command print nothing and exit 1? No -> FAIL with note `cleanup_failed` (a process is still running on the target).
+### 7. End what is left on the target
+Do (manual): On the target, as the same account that runs the commands, run `pkill -f yasshm-mt004-marker`.
+Expect: yes or no: did the command run without an error (it exits 1 when nothing was left to end, which is fine)? No, because the account may not signal the process -> BLOCKED with note `cleanup_failed`, and the human ends the process.
+Record: nothing
+
+### 8. Nothing is left on the target
+Do (manual): On the target, as any account, run `pgrep -f yasshm-mt004-marker`.
+Expect: yes or no: does it print nothing and exit 1? Any pid -> FAIL with note `cleanup_failed` (a process is still running on the target).
 Record: nothing
 
 ## Result

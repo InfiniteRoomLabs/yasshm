@@ -251,6 +251,12 @@ func (d *decoder) scalarString(path string, v *yaml.Node) (string, bool) {
 		d.add(path, v, "must be valid UTF-8 without NUL")
 		return "", false
 	}
+	// The example config marks every value the operator must set with this
+	// prefix; one left in place is a forgotten edit, not a setting.
+	if strings.HasPrefix(v.Value, PlaceholderPrefix) {
+		d.add(path, v, "replace the placeholder value")
+		return "", false
+	}
 	return v.Value, true
 }
 

@@ -1,6 +1,8 @@
 # config.example.yaml -- every key yasshm's config loader accepts, with synthetic values.
 #
-# Copy to /etc/yasshm/config.yaml and replace the values marked REPLACE. Nothing here is a
+# Copy to /etc/yasshm/config.yaml and replace every value that starts with REPLACE_ (the team
+# domain, the audience, your email, the target's host and its host key). The loader refuses a string value that still starts with REPLACE_
+# ("replace the placeholder value"), so a forgotten edit stops `config check`. Nothing here is a
 # real host, account or key. `yasshm config check --config <file>` validates the file strictly:
 # an unknown key, a duplicate key, a wrong type, a missing required key, a YAML anchor or alias
 # is an error, and every problem is reported at once as `path.to.key: message (line N)`.
@@ -41,7 +43,7 @@ auth:
     # team_domain: your Cloudflare Access team domain, a DNS host name (no scheme). Required.
     # Tokens must name https://<team_domain> as their issuer, and the signing keys are fetched
     # from https://<team_domain>/cdn-cgi/access/certs.
-    team_domain: example-team.cloudflareaccess.com
+    team_domain: REPLACE_WITH_YOUR_TEAM.cloudflareaccess.com
 
     # audience: the AUD tag of the Access application that fronts the gateway. Required.
     # 1 to 512 characters, no spaces. Every token must carry it in its aud claim.
@@ -62,7 +64,7 @@ tenants:
     # one of email and common_name.
     principals:
       # email: an Access user, compared ignoring ASCII case. ASCII addresses only.
-      - email: operator@example.net
+      - email: REPLACE_WITH_YOUR_EMAIL@example.net
       # common_name: an Access service token's client id. Map one only for a service token you
       # created yourself: any token that carries common_name is treated as a service token.
       # - common_name: REPLACE_WITH_THE_SERVICE_TOKEN_CLIENT_ID
@@ -85,7 +87,7 @@ tenants:
         # description: optional, at most 256 bytes, no control characters. Shown to the assistant.
         description: Example lab host
         # host: a DNS host name or an IP address. Required.
-        host: lab-1.example.net
+        host: REPLACE_WITH_THE_TARGET_HOST.example.net
         # port: optional, default 22. 1 to 65535.
         port: 22
         # identity: the id of one of the identities above. Required.
@@ -94,7 +96,7 @@ tenants:
         # base64, a trailing comment is dropped; no options, no certificate). Exactly one of
         # host_key and known_hosts_file is required. There is no trust on first use: get the
         # line from the target (deploy/README.md) and compare it out of band.
-        host_key: "ssh-ed25519 REPLACE_WITH_THE_TARGETS_HOST_KEY_LINE_FROM_ssh-keyscan_OR_THE_HOST"
+        host_key: "ssh-ed25519 REPLACE_WITH_THE_HOST_KEY_READ_ON_THE_TARGET"
         # known_hosts_file: instead of host_key, an absolute path to an OpenSSH known_hosts file
         # that lists this server's host:port. At most 1 MiB, not writable by group or other, no
         # @cert-authority line.
@@ -143,7 +145,8 @@ tenants:
       # Commands running at once for the tenant (one SSH connection each). Over it: busy.
       # Default 4, range 1 to 64.
       max_concurrent_commands: 4
-      # Commands, probes and file transfers running at once on one server. Over it: busy.
+      # Commands running at once on one server; separately, probes and file transfers running at once
+# on one server (each count has this limit). Over it: busy.
       # Default 2, range 1 to 64.
       max_concurrent_per_server: 2
       # The longest command text accepted, in bytes.

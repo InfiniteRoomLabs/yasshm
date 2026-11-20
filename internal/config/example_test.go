@@ -22,9 +22,28 @@ var (
 )
 
 const (
-	placeholderHostKey = `"ssh-ed25519 REPLACE_WITH_THE_TARGETS_HOST_KEY_LINE_FROM_ssh-keyscan_OR_THE_HOST"`
+	placeholderHostKey = `"ssh-ed25519 REPLACE_WITH_THE_HOST_KEY_READ_ON_THE_TARGET"`
 	placeholderKeyFile = "/etc/yasshm/keys/lab-look_ed25519"
 )
+
+// placeholderValues are the example's REPLACE_ values and what the test puts
+// in their place.
+var placeholderValues = [][2]string{
+	{"REPLACE_WITH_YOUR_TEAM.cloudflareaccess.com", "example-team.cloudflareaccess.com"},
+	{"REPLACE_WITH_THE_ACCESS_APPLICATION_AUD_TAG", "an-example-audience"},
+	{"REPLACE_WITH_YOUR_EMAIL@example.net", "operator@example.net"},
+	{"REPLACE_WITH_THE_TARGET_HOST.example.net", "lab-1.example.net"},
+}
+
+// fillExample returns the example with the REPLACE_ values, the host key and
+// the key file path replaced.
+func fillExample(text string, k *keys) string {
+	pairs := []string{placeholderHostKey, `"` + k.hostKey + `"`, placeholderKeyFile, k.keyFile}
+	for _, p := range placeholderValues {
+		pairs = append(pairs, p[0], p[1])
+	}
+	return strings.NewReplacer(pairs...).Replace(text)
+}
 
 func readExample(t *testing.T) string {
 	t.Helper()
@@ -46,8 +65,7 @@ func TestExampleLoads(t *testing.T) {
 	}
 	k := genKeys(t)
 	t.Run("happy/the example loads with a generated key and host key", func(t *testing.T) {
-		filled := strings.NewReplacer(placeholderHostKey, `"`+k.hostKey+`"`, placeholderKeyFile, k.keyFile).Replace(text)
-		cfg, err := Load(writeConfig(t, k.dir, filled))
+		cfg, err := Load(writeConfig(t, k.dir, fillExample(text, k)))
 		if err != nil {
 			t.Fatalf("the example does not load: %v", err)
 		}
@@ -58,14 +76,35 @@ func TestExampleLoads(t *testing.T) {
 			t.Errorf("the example's limits are not the defaults: %+v", cfg.Tenants[0].Limits)
 		}
 	})
-	t.Run("sad/the example as shipped is refused on the host key and the key file only", func(t *testing.T) {
+	t.Run("sad/the example as shipped is refused on every value to replace", func(t *testing.T) {
 		_, err := Load(writeConfig(t, k.dir, text))
 		if err == nil {
 			t.Fatal("the unedited example loads: a placeholder would reach production")
 		}
-		got := problems(t, err)
-		if len(got) != 2 || !strings.Contains(got[0]+got[1], "host_key") || !strings.Contains(got[0]+got[1], "private_key_file") {
-			t.Fatalf("problems: %v", got)
+		got := strings.Join(problems(t, err), "\n")
+		for _, path := range []string{"auth.cloudflare_access.team_domain", "auth.cloudflare_access.audience", "principals[0].email", "servers[0](lab-1).host:", "servers[0](lab-1).host_key", "identities.lab-look.private_key_file"} {
+			if !strings.Contains(got, path) {
+				t.Errorf("no problem for %s in:\n%s", path, got)
+			}
+		}
+		if n := strings.Count(got, "replace the placeholder value"); n != len(placeholderValues) {
+			t.Errorf("%d placeholder problems, want %d:\n%s", n, len(placeholderValues), got)
+		}
+	})
+}
+
+// TestPlaceholderRefused: a string value that starts with REPLACE_ is refused
+// wherever it stands; the same text inside a value is fine.
+func TestPlaceholderRefused(t *testing.T) {
+	k := genKeys(t)
+	base := k.base()
+	t.Run("sad/a value that starts with REPLACE_", func(t *testing.T) {
+		_, err := Parse([]byte(edit(t, base, "description: Example lab host", "description: REPLACE_ME")))
+		wantProblem(t, err, "description: replace the placeholder value")
+	})
+	t.Run("happy/REPLACE_ inside a value", func(t *testing.T) {
+		if _, err := Parse([]byte(edit(t, base, "description: Example lab host", "description: do not REPLACE_ME"))); err != nil {
+			t.Fatal(err)
 		}
 	})
 }
@@ -207,9 +246,10 @@ func TestExampleHasEveryKey(t *testing.T) {
 	}
 }
 
-// TestUnitStopTimeout ties the unit's TimeoutStopSec to the limits table: it
-// must exceed the largest shutdown_grace_seconds plus the 5 seconds serve
-// waits for requests still answering, with margin.
+// TestUnitStopTimeout ties the unit's TimeoutStopSec to the code: it must
+// exceed the largest shutdown_grace_seconds in the limits table plus the wait
+// for requests still answering that serve adds (httpCloseWait in
+// internal/cli/serve.go, read from the source), with 10 seconds of margin.
 func TestUnitStopTimeout(t *testing.T) {
 	b, err := os.ReadFile(unitPath) //nolint:gosec // G304: a fixed repository path
 	if err != nil {
@@ -219,8 +259,17 @@ func TestUnitStopTimeout(t *testing.T) {
 	if m == nil {
 		t.Fatal("the unit has no TimeoutStopSec in whole seconds")
 	}
+	src, err := os.ReadFile(filepath.Join("..", "cli", "serve.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := regexp.MustCompile(`(?m)^const httpCloseWait = (\d+) \* time\.Second$`).FindStringSubmatch(string(src))
+	if w == nil {
+		t.Fatal("serve.go has no httpCloseWait constant in whole seconds")
+	}
+	wait, _ := strconv.Atoi(w[1])
 	secs, _ := strconv.Atoi(m[1])
-	limit := time.Duration(limitByKey("shutdown_grace_seconds").max)*time.Second + 5*time.Second
+	limit := time.Duration(limitByKey("shutdown_grace_seconds").max)*time.Second + time.Duration(wait)*time.Second
 	if got := time.Duration(secs) * time.Second; got < limit+10*time.Second {
 		t.Errorf("TimeoutStopSec is %v; the longest graceful stop is %v, and it needs 10 seconds of margin", got, limit)
 	}

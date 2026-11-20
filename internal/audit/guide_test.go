@@ -4,37 +4,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/guidedoc"
 )
-
-var guidePath = filepath.Join("..", "..", "docs", "operator-guide.md")
-
-// guideBlock returns the text between the markers <!-- name:begin --> and
-// <!-- name:end --> in the operator guide.
-func guideBlock(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(guidePath) //nolint:gosec // G304: a fixed repository path
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(string(b), "<!-- "+name+":begin -->")
-	if !ok {
-		t.Fatalf("the operator guide has no %s:begin marker", name)
-	}
-	body, _, ok := strings.Cut(rest, "<!-- "+name+":end -->")
-	if !ok {
-		t.Fatalf("the operator guide has no %s:end marker", name)
-	}
-	return body
-}
 
 // guideSamples are the audit events the operator guide shows, one per event
 // type (and one more where the shape differs), in the order of the guide.
@@ -98,7 +75,7 @@ func sampleLines(t *testing.T) []string {
 func TestGuideAuditSamples(t *testing.T) {
 	want := sampleLines(t)
 	var got []string
-	for _, l := range strings.Split(guideBlock(t, "audit-samples"), "\n") {
+	for _, l := range strings.Split(guidedoc.Block(t, "audit-samples"), "\n") {
 		if strings.HasPrefix(l, "{") {
 			got = append(got, l)
 		}
@@ -164,7 +141,7 @@ func TestGuideRejectReasons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{ReasonSuppressed: true}
+	want := []string{ReasonSuppressed}
 	ast.Inspect(f, func(n ast.Node) bool {
 		cl, ok := n.(*ast.CompositeLit)
 		if !ok {
@@ -173,62 +150,16 @@ func TestGuideRejectReasons(t *testing.T) {
 		if id, ok := cl.Type.(*ast.Ident); ok && id.Name == "RejectReason" && len(cl.Elts) == 1 {
 			if lit, ok := cl.Elts[0].(*ast.BasicLit); ok {
 				s, _ := strconv.Unquote(lit.Value)
-				want[s] = true
+				want = append(want, s)
 			}
 		}
 		return true
 	})
-	got := firstCells(guideBlock(t, "reject-reasons"))
+	got := guidedoc.FirstCells(guidedoc.Block(t, "reject-reasons"))
 	if len(want) < 15 {
 		t.Fatalf("read only %d reasons from event.go", len(want))
 	}
-	if diff := setDiff(want, got); diff != "" {
+	if diff := guidedoc.Diff(want, got); diff != "" {
 		t.Errorf("the guide's reason table and event.go differ: %s", diff)
-	}
-}
-
-// firstCells returns the set of first cells of the table rows in block, each
-// with its backticks removed (the header and separator rows are skipped).
-func firstCells(block string) map[string]bool {
-	out := map[string]bool{}
-	for _, l := range strings.Split(block, "\n") {
-		if !strings.HasPrefix(l, "| `") {
-			continue
-		}
-		cell, _, _ := strings.Cut(strings.TrimPrefix(l, "| "), " |")
-		out[strings.Trim(strings.TrimSpace(cell), "`")] = true
-	}
-	return out
-}
-
-// setDiff describes how two sets differ, or returns "".
-func setDiff(want, got map[string]bool) string {
-	var missing, extra []string
-	for k := range want {
-		if !got[k] {
-			missing = append(missing, k)
-		}
-	}
-	for k := range got {
-		if !want[k] {
-			extra = append(extra, k)
-		}
-	}
-	sort.Strings(missing)
-	sort.Strings(extra)
-	if len(missing) == 0 && len(extra) == 0 {
-		return ""
-	}
-	return "missing from the guide: " + strings.Join(missing, ", ") + "; not in the code: " + strings.Join(extra, ", ")
-}
-
-// TestGuideHelpers proves the table readers see what they should.
-func TestGuideHelpers(t *testing.T) {
-	got := firstCells("| Reason | Meaning |\n|---|---|\n| `a_b` | x |\n| `c` | y |\n")
-	if len(got) != 2 || !got["a_b"] || !got["c"] {
-		t.Fatalf("firstCells = %v", got)
-	}
-	if setDiff(map[string]bool{"a": true}, map[string]bool{"a": true}) != "" || setDiff(map[string]bool{"a": true}, nil) == "" {
-		t.Fatal("setDiff is wrong")
 	}
 }

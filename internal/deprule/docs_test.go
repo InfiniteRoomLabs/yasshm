@@ -148,7 +148,10 @@ func linkProblems(t *testing.T, root, rel string) []string {
 func TestDocsLinks(t *testing.T) {
 	n := 0
 	for _, f := range trackedFiles(t, repoRoot) {
-		if !strings.HasSuffix(f, ".md") {
+		// docs/phases holds the review lanes' reports: point-in-time records
+		// written by reviewers, not documents the product ships, so their links
+		// are not checked (TestDocsNotWrapped skips them for the same reason).
+		if !strings.HasSuffix(f, ".md") || strings.HasPrefix(f, "docs/phases/") {
 			continue
 		}
 		n++

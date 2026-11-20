@@ -3,6 +3,13 @@ name: Release
 # A release is cut by an attended step: the operator pushes a tag named v<version>
 # (for example v0.1.0) on a commit that is on the default branch. Nothing else
 # triggers this workflow: not a branch push, not a pull request, not a schedule.
+#
+# The "Check the tag" step prevents a mistake (a tag on an unmerged commit); it does
+# not stop someone who can push tags: a tag push runs the workflow file of the
+# tagged commit, so that file can drop the check. Before the first release the
+# repository needs a ruleset for tags matching v* that limits creating, updating and
+# deleting them to the repository admin, a protected default branch and, if offered,
+# immutable releases (SECURITY.md, "Releases").
 on:
   push:
     tags: ["v*"]
@@ -32,9 +39,6 @@ jobs:
     permissions:
       contents: write
     env:
-      # The one credential: the workflow's own token. It reaches the steps below
-      # through the environment, never through a command line.
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ github.ref_name }}
       REPOSITORY: ${{ github.repository }}
       TAG_SHA: ${{ github.sha }}
@@ -50,6 +54,11 @@ jobs:
           install: true
           cache: false
       - name: Check the tag
+        env:
+          # The one credential, the workflow's own token, goes only to the two steps
+          # that call gh (never to the tool installs or the build), through the
+          # environment and never a command line.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
@@ -67,6 +76,8 @@ jobs:
           VERSION="${TAG#v}" mise run build
           cat dist/SHA256SUMS
       - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           flags=(--verify-tag --title "$TAG" --generate-notes)

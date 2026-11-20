@@ -148,48 +148,63 @@ run_e2e() {
   echo "e2e: $got of $want end-to-end scenarios passed against the real binary in ${took}s (uid $(id -u))"
 }
 
+# go_test_step <step> <what> <run regex> <packages...>: runs the tests that
+# match the regex in the packages, verbosely, and fails unless every one of
+# them reports PASS: the expected count comes from `go test -list`, not a
+# constant, so "ran zero tests" and "ran some" cannot pass (as in run_e2e). It
+# leaves the number that passed in GO_TEST_PASSED.
+go_test_step() {
+  local step=$1 what=$2 run=$3 log want got
+  shift 3
+  want=$(cd "$repo_root" && mise exec -- go test -list "$run" "$@" | grep -cE '^Test' || true)
+  if [ "${want:-0}" -lt 1 ]; then
+    echo "$step: go test -list found no tests matching $run" >&2
+    exit 1
+  fi
+  log=$(mktemp)
+  if ! (cd "$repo_root" && mise exec -- go test -count=1 -v -run "$run" "$@") >"$log" 2>&1; then
+    cat "$log"
+    rm -f "$log"
+    echo "$step: $what failed" >&2
+    exit 1
+  fi
+  got=$(grep -cE '^--- PASS: Test' "$log" || true)
+  rm -f "$log"
+  if [ "${got:-0}" -ne "$want" ]; then
+    echo "$step: ${got:-0} of $want $what passed; every one must pass" >&2
+    exit 1
+  fi
+  GO_TEST_PASSED=$got
+}
+
 # The shipped deployment files (spec section 8): the tests of ./deploy (the
 # unit's directives, the example config through `config check`), the checks on
 # the workflow files (TestWorkflow* in internal/deprule: pinned actions,
-# read-only permissions, the release trigger), the limits and unit-timeout
-# tests that read the example (internal/config), and `systemd-analyze verify`
+# read-only permissions, the release trigger), the example and unit-timeout
+# tests that read the code (internal/config), and `systemd-analyze verify`
 # on a copy of the unit whose binary path points at a stub, where the tool
 # exists. verify exits 0 on an unknown directive and prints a warning, so any
 # line it prints about the unit fails the step.
 run_deploy() {
   echo "== deploy =="
-  local log tmp out
-  log=$(mktemp)
-  tmp=$(mktemp -d)
-  # shellcheck disable=SC2064
-  trap "rm -rf '$log' '$tmp'" RETURN
-  if ! (cd "$repo_root" && mise exec -- go test -count=1 -v ./deploy) >"$log" 2>&1; then
-    cat "$log"
-    echo "deploy: the deployment file tests failed" >&2
-    exit 1
-  fi
-  if [ "$(grep -cE '^--- PASS: Test(Unit|Example)' "$log" || true)" -lt 5 ]; then
-    cat "$log"
-    echo "deploy: fewer deployment file tests passed than expected" >&2
-    exit 1
-  fi
-  if ! (cd "$repo_root" && mise exec -- go test -count=1 -run '^(TestWorkflow|TestExample|TestUnitStopTimeout)' ./internal/deprule ./internal/config) >"$log" 2>&1; then
-    cat "$log"
-    echo "deploy: the workflow or example tests failed" >&2
-    exit 1
-  fi
+  local tmp out ours
+  go_test_step deploy "the deployment file tests" '^Test' ./deploy
+  go_test_step deploy "the workflow, example and unit-timeout tests" '^(TestWorkflow|TestExample|TestPlaceholderRefused|TestUnitStopTimeout)' ./internal/deprule ./internal/config
   if ! command -v systemd-analyze >/dev/null 2>&1; then
     echo "check.sh: systemd-analyze is not installed here; the unit was not verified by systemd (the directive tests ran)"
     return 0
   fi
+  tmp=$(mktemp -d)
   printf '#!/bin/sh\nexit 0\n' >"$tmp/yasshm"
   chmod 755 "$tmp/yasshm"
   sed "s#/usr/local/bin/yasshm#$tmp/yasshm#g" "$repo_root/deploy/yasshm.service" >"$tmp/yasshm.service"
   out=$(systemd-analyze verify "$tmp/yasshm.service" 2>&1) || {
     echo "$out" >&2
+    rm -rf "$tmp"
     echo "deploy: systemd-analyze verify failed" >&2
     exit 1
   }
+  rm -rf "$tmp"
   # verify also reads the host's own units and may warn about them (seen on the
   # CI runner: CPUAccounting= in the cloud agent's units); only a line about
   # this unit counts.
@@ -203,26 +218,14 @@ run_deploy() {
 }
 
 # The documentation checks (TestDocs* in internal/deprule): every relative link
-# in every Markdown file resolves (anchors too), every .md .yaml .yml .service
-# .sh and .toml file is ASCII, the template-placeholder grep is empty and the
-# prose is not hard-wrapped. The step fails unless the checks ran.
+# in every Markdown file resolves (anchors too; the lane reports under
+# docs/phases are exempt), every .md .yaml .yml .service .sh and .toml file is
+# ASCII, the template-placeholder grep is empty and the prose is not
+# hard-wrapped. The step fails unless the checks ran.
 run_docs() {
   echo "== docs =="
-  local log
-  log=$(mktemp)
-  # shellcheck disable=SC2064
-  trap "rm -f '$log'" RETURN
-  if ! (cd "$repo_root" && mise exec -- go test -count=1 -v -run '^TestDocs' ./internal/deprule) >"$log" 2>&1; then
-    cat "$log"
-    echo "docs: the documentation checks failed" >&2
-    exit 1
-  fi
-  if [ "$(grep -cE '^--- PASS: TestDocs' "$log" || true)" -lt 4 ]; then
-    cat "$log"
-    echo "docs: fewer documentation checks passed than expected" >&2
-    exit 1
-  fi
-  echo "docs: $(grep -cE '^--- PASS: TestDocs' "$log") documentation checks passed"
+  go_test_step docs "the documentation checks" '^TestDocs' ./internal/deprule
+  echo "docs: $GO_TEST_PASSED documentation checks passed"
 }
 
 run_cover() {

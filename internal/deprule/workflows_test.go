@@ -263,3 +263,39 @@ func TestWorkflowNoInterpolationInRun(t *testing.T) {
 		}
 	})
 }
+
+// TestWorkflowTokenOnlyInSteps: no job-level env carries a token or a secret,
+// so the workflow's token reaches only the steps that ask for it (not the tool
+// installs or the build).
+func TestWorkflowTokenOnlyInSteps(t *testing.T) {
+	for _, w := range loadWorkflows(t) {
+		for _, msg := range w.jobEnvTokens() {
+			t.Error(msg)
+		}
+	}
+	t.Run("sad/a job-level token is found", func(t *testing.T) {
+		w := parseWorkflow(t, "x.yml", "jobs:\n  a:\n    env:\n      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n      TAG: x\n    steps:\n      - run: true\n")
+		if got := w.jobEnvTokens(); len(got) != 1 {
+			t.Fatalf("flagged %v", got)
+		}
+		w = parseWorkflow(t, "y.yml", "jobs:\n  a:\n    env:\n      TAG: x\n    steps:\n      - env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run: true\n")
+		if got := w.jobEnvTokens(); len(got) != 0 {
+			t.Fatalf("flagged a step-level token: %v", got)
+		}
+	})
+}
+
+// jobEnvTokens returns the job-level env entries that hold a secret or are
+// named like a token.
+func (w workflow) jobEnvTokens() []string {
+	var bad []string
+	for id, j := range w.jobs() {
+		for k, v := range asMap(j["env"]) {
+			val, _ := v.(string)
+			if strings.Contains(val, "secrets.") || strings.Contains(strings.ToUpper(k), "TOKEN") {
+				bad = append(bad, fmt.Sprintf("%s: job %s sets %s in its job-level env", w.name, id, k))
+			}
+		}
+	}
+	return bad
+}

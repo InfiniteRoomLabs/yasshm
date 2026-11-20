@@ -462,7 +462,7 @@ func TestIgnoreHangups(t *testing.T) {
 			t.Fatalf("log = %q", out.String())
 		}
 		var m map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &m); err != nil || m["level"] != "WARN" || m["version"] != Version {
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &m); err != nil || m["level"] != "WARN" || m["version"] != Version || m["time"] == nil {
 			t.Fatalf("line %q: %v", out.String(), err)
 		}
 	})
