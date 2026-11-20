@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"io/fs"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/realsshd"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
@@ -608,17 +608,9 @@ var scenarios = []scenario{
 		noHostIn(t, &srv, err.Error())
 	}},
 	{"sad/unreachable port", func(t *testing.T, tg target, c *Client) {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		port := l.Addr().(*net.TCPAddr).Port
-		if cerr := l.Close(); cerr != nil {
-			t.Fatal(cerr)
-		}
 		srv := *tg.srv
-		srv.Port = port
-		_, err = c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
+		srv.Port = loopback.RefusingPort(t) // reserved for the test, refuses every connection
+		_, err := c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
 		if !errors.Is(err, CodeUnreachable) {
 			t.Fatalf("err = %v", err)
 		}

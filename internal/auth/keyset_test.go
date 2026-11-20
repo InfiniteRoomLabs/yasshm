@@ -8,9 +8,11 @@ import (
 	"errors"
 	"maps"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -232,6 +234,20 @@ func TestIssuerDownAtStart(t *testing.T) {
 		}
 		if !strings.Contains(f.logs.String(), `"reason":"network"`) {
 			t.Fatalf("log = %s", f.logs.String())
+		}
+	})
+	t.Run("corner/a stopped issuer keeps its port and counts nothing", func(t *testing.T) {
+		u, err := url.Parse(f.is.CertsURL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lc net.ListenConfig
+		if l, lerr := lc.Listen(context.Background(), "tcp", u.Host); lerr == nil {
+			_ = l.Close()
+			t.Fatal("another listener took the stopped issuer's port")
+		}
+		if f.is.Fetches() != 0 {
+			t.Fatalf("%d fetches counted while down", f.is.Fetches())
 		}
 	})
 	f.is.Up()

@@ -188,8 +188,7 @@ func TestStartFailures(t *testing.T) {
 	}
 	t.Run("sad/an unreachable server is ssh_unreachable", func(t *testing.T) {
 		t.Parallel()
-		h := newHarness(t)
-		h.sa.Close()
+		h := newHarness(t, withRefusingPort())
 		r, err := h.e.Start(t.Context(), tA, h.actorA, "srv-1", "echo x", StartOptions{})
 		if CodeOf(err) != Code(sshclient.CodeUnreachable) || r.Status != StatusError {
 			t.Fatalf("%v %+v", err, r)

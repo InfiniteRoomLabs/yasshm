@@ -125,7 +125,6 @@ type Key struct {
 
 // Issuer is the local issuer. Its methods are safe for concurrent use.
 type Issuer struct {
-	t       testing.TB
 	addr    string
 	mu      sync.Mutex
 	srv     *http.Server
@@ -134,6 +133,7 @@ type Issuer struct {
 	fault   Fault
 	hold    chan struct{}
 	gate    chan struct{}
+	down    bool
 	closed  bool
 	fetches atomic.Int64
 	now     func() time.Time
@@ -148,21 +148,55 @@ func New(t testing.TB, now func() time.Time) *Issuer {
 		now = time.Now
 	}
 	k := Key{ID: "key-0", Private: RSAKey(0)}
-	is := &Issuer{t: t, served: []Key{k}, signing: k, now: now, hold: make(chan struct{})}
+	is := &Issuer{served: []Key{k}, signing: k, now: now, hold: make(chan struct{})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	is.addr = ln.Addr().String()
-	is.serve(ln)
+	srv := &http.Server{Handler: http.HandlerFunc(is.handle), ReadHeaderTimeout: 5 * time.Second}
+	is.srv = srv
+	go func() { _ = srv.Serve(&downListener{Listener: ln, is: is}) }()
 	t.Cleanup(is.Close)
 	return is
 }
 
-func (is *Issuer) serve(ln net.Listener) {
-	srv := &http.Server{Handler: http.HandlerFunc(is.handle), ReadHeaderTimeout: 5 * time.Second}
-	is.srv = srv
-	go func() { _ = srv.Serve(ln) }()
+// downListener keeps the issuer's address bound for its whole life: while
+// the issuer is down it accepts each connection and resets it at once, the
+// way a dead endpoint answers, so no other server can be given the port a
+// test still names.
+type downListener struct {
+	net.Listener
+	is *Issuer
+}
+
+// Accept returns the next connection, resetting those that arrive while the
+// issuer is down.
+func (l *downListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if !l.is.isDown() {
+			return c, nil
+		}
+		reset(c)
+	}
+}
+
+// reset closes c with an RST rather than a FIN.
+func reset(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = c.Close()
+}
+
+func (is *Issuer) isDown() bool {
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	return is.down
 }
 
 // Close stops the issuer and releases every held response.
@@ -180,29 +214,29 @@ func (is *Issuer) Close() {
 	}
 }
 
-// Down stops listening, so a fetch gets "connection refused" until Up.
+// Down makes the issuer a dead endpoint until Up: every connection,
+// new or kept alive, is reset before a request is read, and nothing is
+// counted as a fetch. The address stays bound, so no other server can take
+// the port while a test still names it.
 func (is *Issuer) Down() {
 	is.mu.Lock()
-	defer is.mu.Unlock()
-	if is.srv != nil {
-		_ = is.srv.Close()
-		is.srv = nil
+	is.down = true
+	srv := is.srv
+	is.mu.Unlock()
+	if srv != nil {
+		srv.SetKeepAlivesEnabled(false) // closes the idle kept-alive connections
 	}
 }
 
-// Up listens again on the same address after Down.
+// Up serves again on the same address after Down.
 func (is *Issuer) Up() {
 	is.mu.Lock()
-	defer is.mu.Unlock()
-	if is.srv != nil || is.closed {
-		return
+	is.down = false
+	srv := is.srv
+	is.mu.Unlock()
+	if srv != nil {
+		srv.SetKeepAlivesEnabled(true)
 	}
-	ln, err := net.Listen("tcp", is.addr)
-	if err != nil {
-		is.t.Errorf("accesstest: listen again on %s: %v", is.addr, err)
-		return
-	}
-	is.serve(ln)
 }
 
 // SetFault switches the JWKS endpoint's behaviour.
@@ -278,6 +312,15 @@ func (is *Issuer) ServedKeys() []Key {
 }
 
 func (is *Issuer) handle(w http.ResponseWriter, r *http.Request) {
+	if is.isDown() {
+		// A request read on a connection accepted just before Down.
+		if hj, ok := w.(http.Hijacker); ok {
+			if c, _, err := hj.Hijack(); err == nil {
+				reset(c)
+			}
+		}
+		return
+	}
 	is.fetches.Add(1)
 	is.mu.Lock()
 	fault, served, hold, gate := is.fault, append([]Key(nil), is.served...), is.hold, is.gate

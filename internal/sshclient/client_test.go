@@ -16,6 +16,7 @@ import (
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
 
@@ -248,7 +249,7 @@ func TestConnectRules(t *testing.T) {
 	})
 	t.Run("sad/a closed loopback port", func(t *testing.T) {
 		srv := silentServer(t)
-		srv.Port = closedPort(t)
+		srv.Port = loopback.RefusingPort(t) // reserved for the test, refuses every connection
 		_, err := testClient().Exec(ctx, testTenant, srv, "true", nil, nil)
 		if !errors.Is(err, CodeUnreachable) {
 			t.Fatalf("err = %v", err)
@@ -297,20 +298,6 @@ func silentServer(t *testing.T) *tenant.Server {
 		HostKey: otherHostKey(t), Access: tenant.AccessLook,
 		Identity: tenant.Identity{User: "someone", PrivateKeyFile: writeKeyFile(t)},
 	}
-}
-
-// closedPort returns a loopback port nothing listens on.
-func closedPort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if cerr := l.Close(); cerr != nil {
-		t.Fatal(cerr)
-	}
-	return port
 }
 
 // failWriter fails every write.

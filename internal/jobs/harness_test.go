@@ -16,6 +16,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/sshclient"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
 
@@ -153,6 +154,19 @@ func withServer(o sshtest.Options) opt {
 		for i := range cfg.Tenants[0].Servers {
 			srv := serverFor(tA, cfg.Tenants[0].Servers[i].ID, h.sa)
 			cfg.Tenants[0].Servers[i] = srv
+		}
+	}
+}
+
+// withRefusingPort points tenant-a's servers at a loopback port that is
+// reserved for the test and refuses every connection. Closing the sshtest
+// server instead would free its port, and a parallel test's server could be
+// given it before the dial.
+func withRefusingPort() opt {
+	return func(h *harness, cfg *Config) {
+		port := loopback.RefusingPort(h.t)
+		for i := range cfg.Tenants[0].Servers {
+			cfg.Tenants[0].Servers[i].Port = port
 		}
 	}
 }
