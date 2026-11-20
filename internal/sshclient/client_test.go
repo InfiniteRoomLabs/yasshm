@@ -832,3 +832,47 @@ func TestSFTPFaults(t *testing.T) {
 		checkFile(t, p, "keep", 0o600)
 	})
 }
+
+// TestSignalReplyLostToExit: a server that ends the command and closes the
+// channel before it answers the signal request (the reply can no longer
+// arrive). Signal reports the signal delivered when the command ended by
+// it, and stop reports the exit it saw; neither says "may still run".
+func TestSignalReplyLostToExit(t *testing.T) {
+	tg := newSSHTest(t, sshtest.Options{ExitBeforeSignalReply: true})
+	c := testClient()
+	t.Run("corner/Signal sees the exit the signal caused", func(t *testing.T) {
+		cmd, _ := startReady(t, tg, c)
+		if err := cmd.Signal("TERM"); err != nil {
+			t.Fatalf("Signal(TERM) = %v", err)
+		}
+		st, err := waitBounded(t, cmd)
+		if err != nil || st.Outcome != OutcomeSignaled || st.Signal != "TERM" || st.MayStillRun {
+			t.Fatalf("status %+v err %v", st, err)
+		}
+	})
+	t.Run("corner/stop sees the exit and sends no KILL", func(t *testing.T) {
+		cmd, _ := startReady(t, tg, c)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		st, _ := cmd.Wait(ctx)
+		if st.Outcome != OutcomeSignaled || st.Signal != "TERM" || !st.TermSent || st.KillSent || st.MayStillRun {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("sad/a command that ignores the signal is not delivered", func(t *testing.T) {
+		out := newNotifyBuffer()
+		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, `trap "" INT; echo ready; sleep 0.2; exit 4`, out, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Close() })
+		out.waitFor(t, "ready\n", 10*time.Second)
+		if err := cmd.Signal("INT"); !errors.Is(err, ErrNotRunning) {
+			t.Fatalf("Signal(INT) = %v, want not running (it ended by its own exit)", err)
+		}
+		st, _ := waitBounded(t, cmd)
+		if st.Outcome != OutcomeExited || st.Code != 4 || st.MayStillRun {
+			t.Fatalf("status %+v", st)
+		}
+	})
+}

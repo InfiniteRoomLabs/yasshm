@@ -588,3 +588,32 @@ func setUserVersion(t *testing.T, path string, v int) error {
 	_, err = db.ExecContext(t.Context(), "PRAGMA user_version = "+strconv.Itoa(v))
 	return err
 }
+
+// TestSignalReplyLost: the server ends the command and closes the channel
+// before it answers the signal request. Kill reports the signal delivered
+// (the command ended by it), the record is killed with that signal, and
+// neither a kill nor a timeout leaves "may still run".
+func TestSignalReplyLost(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, withServer(sshtest.Options{ExitBeforeSignalReply: true}))
+	t.Run("corner/a kill whose reply was lost is delivered", func(t *testing.T) {
+		r := h.start("echo ready; sleep 30", StartOptions{})
+		if _, err := h.e.ReadOutput(t.Context(), tA, r.ID, ReadRequest{Stream: StreamStdout, Wait: 10 * time.Second}); err != nil {
+			t.Fatal(err)
+		}
+		_, delivered, err := h.e.Kill(t.Context(), tA, h.actorA, r.ID, "")
+		if err != nil || !delivered {
+			t.Fatalf("delivered %v err %v", delivered, err)
+		}
+		got := h.wait(r.ID)
+		if got.Status != StatusKilled || got.Signal != "TERM" || got.MayStillRun {
+			t.Fatalf("%+v", got)
+		}
+	})
+	t.Run("corner/a timeout whose reply was lost is timed_out and over", func(t *testing.T) {
+		got := h.wait(h.start("sleep 30", StartOptions{TimeoutSeconds: 1}).ID)
+		if got.Status != StatusTimedOut || got.Signal != "TERM" || got.MayStillRun {
+			t.Fatalf("%+v", got)
+		}
+	})
+}

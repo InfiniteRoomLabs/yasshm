@@ -265,27 +265,53 @@ func (cmd *Command) stop(cause error) {
 			return
 		}
 		// A refused or unanswered signal skips its wait: nothing was sent.
-		if ok, _, _ := cmd.sendSignal("TERM", cmd.opts.KillGrace); ok {
-			cmd.mu.Lock()
-			cmd.termSent = true
-			cmd.mu.Unlock()
-			if cmd.waitExit(cmd.opts.KillGrace) {
-				return
-			}
+		// A request that failed with an error (the channel closed before
+		// the reply) may have been lost to the command's own end, which
+		// the signal itself can cause: wait the same bound for the exit
+		// before deciding.
+		if cmd.signalAndWait("TERM", cmd.opts.KillGrace, &cmd.termSent) {
+			return
 		}
 		if cmd.isClosed() {
 			return
 		}
-		if ok, _, _ := cmd.sendSignal("KILL", cmd.opts.KillWait); ok {
-			cmd.mu.Lock()
-			cmd.killSent = true
-			cmd.mu.Unlock()
-			if cmd.waitExit(cmd.opts.KillWait) {
-				return
-			}
+		if cmd.signalAndWait("KILL", cmd.opts.KillWait, &cmd.killSent) {
+			return
 		}
 		cmd.closeConn(true)
 	})
+}
+
+// signalAndWait sends name with want-reply and waits up to bound for the
+// session to end. It reports whether the session ended; sent is set when
+// the server accepted the request, or when the request failed with an
+// error and the command then ended (the reply was lost as the channel
+// closed). A refused or unanswered request returns false at once.
+func (cmd *Command) signalAndWait(name string, bound time.Duration, sent *bool) bool {
+	ok, silent, err := cmd.sendSignal(name, bound)
+	if !ok && (silent || err == nil) {
+		return false
+	}
+	ended := cmd.waitExit(bound)
+	if ok || ended {
+		cmd.mu.Lock()
+		*sent = true
+		cmd.mu.Unlock()
+	}
+	return ended
+}
+
+// exitSignal returns the signal that ended the session, or "" while it
+// runs or when it ended otherwise.
+func (cmd *Command) exitSignal() string {
+	if !cmd.hasExited() {
+		return ""
+	}
+	var ee *ssh.ExitError
+	if errors.As(cmd.waitErr, &ee) {
+		return cleanSignal(ee.Signal())
+	}
+	return ""
 }
 
 // isClosed reports whether the connection has been closed by this side.
@@ -354,7 +380,9 @@ func (cmd *Command) sendSignal(name string, bound time.Duration) (ok, silent boo
 // running; Wait then reports MayStillRun) and the error matches
 // ErrSignalRefused. A server that does not answer within KillWait gets its
 // connection closed and the error is CodeUnreachable (the command may still
-// be running). A command that already ended gives ErrNotRunning.
+// be running). A command that already ended gives ErrNotRunning. When the
+// channel closes before the reply arrives and the command ended by this
+// signal within KillWait, the signal was delivered and Signal returns nil.
 func (cmd *Command) Signal(name string) error {
 	const op = "signal"
 	if !ValidSignal(name) {
@@ -367,6 +395,14 @@ func (cmd *Command) Signal(name string) error {
 		return newErr(CodeInternal, cmd.server, op, ErrNotRunning.Error(), ErrNotRunning, nil)
 	}
 	ok, silent, err := cmd.sendSignal(name, cmd.opts.KillWait)
+	if err != nil && !silent {
+		// The channel closed before the reply: if the command ended by
+		// this very signal (within the same bound), it was delivered.
+		cmd.waitExit(cmd.opts.KillWait)
+		if cmd.exitSignal() == name {
+			return nil
+		}
+	}
 	switch {
 	case silent:
 		return newErr(CodeUnreachable, cmd.server, op, "the server did not answer the signal request", nil, err)

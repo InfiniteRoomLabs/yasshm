@@ -108,3 +108,26 @@ func TestTransferSlots(t *testing.T) {
 		}
 	})
 }
+
+// TestKillReplyLost: on a server that ends the command and closes the
+// channel before answering the signal request, kill_command reports
+// signal_delivered and the command ends killed, not "may still run".
+func TestKillReplyLost(t *testing.T) {
+	h := newHarness(t, withServer(t, "lossy", sshtest.Options{ExitBeforeSignalReply: true}))
+	r := h.run(t, userA, "lossy", "echo ready; sleep 30", map[string]any{"wait_seconds": 0})
+	if !leakcheck.Poll(10*time.Second, func() bool {
+		var o ReadResult
+		decode(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": r.CommandID, "wait_seconds": 1}), &o)
+		return o.Data == "ready\n"
+	}) {
+		t.Fatal("the command never printed ready")
+	}
+	var k KillResult
+	decode(t, h.call(t, userA, ToolKillCommand, map[string]any{"command_id": r.CommandID}), &k)
+	if !k.SignalDelivered {
+		t.Fatalf("kill = %+v", k)
+	}
+	if got := h.waitDone(t, userA, r.CommandID); got.Status != "killed" || got.Signal != "TERM" || got.MayStillRun {
+		t.Fatalf("read = %+v", got)
+	}
+}

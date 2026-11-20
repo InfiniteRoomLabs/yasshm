@@ -154,6 +154,7 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - The config file and a `known_hosts_file` are refused when group or other can write them, and the audit log when its directory can be written by group or other (a sticky `/tmp` too): tests write configs 0600 and put audit logs in `t.TempDir()` or `leakcheck.PrivDir`.
 - Probes and file transfers hold a per-server slot (`max_concurrent_per_server`) in `mcpserver`; a test that runs several on one slow server gets `busy`.
 - `tenanttest.SSHOptions` waits 5 seconds for a signal's answer; a test against an `sshtest` `SilentSignal` server uses `tenanttest.ShortSSHOptions`.
+- `sshtest` kills a process group before it answers the signal request, so under load the exit and channel close can arrive first and the client's `SendRequest` returns `io.EOF`: `sshclient` then waits the request's bound for the exit before deciding. `sshtest.Options.ExitBeforeSignalReply` forces that order for tests.
 - The template-placeholder check must keep printing nothing: `grep -rEn '<(project|one-line-description|toolchain|gate-steps|repo|slug)>' --exclude-dir=.git .`. Write per-phase slots as `<n>` and `<name>`, never with one of those six words.
 
 ## If you break something

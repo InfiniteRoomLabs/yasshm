@@ -61,6 +61,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- A signal request that fails because the server ended the command and closed the channel before replying no longer reports "may still run": the SSH layer waits the request's bound for the exit, and a command ended by the signal sent counts as delivered (`signal_delivered` true)
 - Phase 6 review gate: a rejected token with a bad signature counts against the per-minute allowance of unverified rejections, and rejections of a token whose signature verified (expired, another audience, unmapped principal, ...) have their own allowance of 60 a minute with their own `suppressed` summary (`stage` `unverified` or `verified`); every request is still answered, and `auth.accepted` is never suppressed
 - Probes and file transfers take a per-server slot (`max_concurrent_per_server`, `busy` over it); the per-principal share of the request cap is taken before the body is read
 - The config file and a `known_hosts_file` are refused when group or other can write them, and the audit log when its directory is writable by group or other

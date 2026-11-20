@@ -302,6 +302,32 @@ var scenarios = []scenario{
 			t.Fatalf("could not clean up pid %d", pid)
 		}
 	}},
+	{"corner/a command ended by TERM never reports may still run", func(t *testing.T, tg target, _ *Client) {
+		// A server may close the channel before it answers the signal
+		// request (sshtest's ExitBeforeSignalReply forces that order); on
+		// either server, a command ended by the TERM it was sent is
+		// signaled TERM and never "may still run", by Signal or by stop.
+		// Bounds of seconds, so a slow reply on a loaded runner is not
+		// taken for a silent server (that case has its own tests).
+		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 3 * time.Second, KillWait: 5 * time.Second})
+		for i := range 10 {
+			cmd, _ := startReady(t, tg, c)
+			if err := cmd.Signal("TERM"); err != nil {
+				t.Fatalf("round %d: Signal(TERM) = %v", i, err)
+			}
+			st, err := waitBounded(t, cmd)
+			if err != nil || st.Outcome != OutcomeSignaled || st.Signal != "TERM" || st.MayStillRun {
+				t.Fatalf("round %d: Signal: status %+v err %v", i, st, err)
+			}
+			cmd2, _ := startReady(t, tg, c)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			st, _ = cmd2.Wait(ctx)
+			if st.Outcome != OutcomeSignaled || st.Signal != "TERM" || !st.TermSent || st.KillSent || st.MayStillRun {
+				t.Fatalf("round %d: stop: status %+v", i, st)
+			}
+		}
+	}},
 	{"happy/the signal request is accepted and delivered", func(t *testing.T, tg target, c *Client) {
 		cmd, pid := startReady(t, tg, c)
 		if err := cmd.Signal("TERM"); err != nil {

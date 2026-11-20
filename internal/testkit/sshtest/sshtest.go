@@ -67,6 +67,12 @@ type Options struct {
 	SilentChannelOpen bool
 	// NoSFTP refuses the sftp subsystem.
 	NoSFTP bool
+	// ExitBeforeSignalReply delivers a signal request's signal, then waits
+	// until the command has ended and its exit and channel close have been
+	// sent, and only then answers the request (which the client can no
+	// longer receive): the deterministic form of a reply lost to the
+	// command's own end.
+	ExitBeforeSignalReply bool
 }
 
 // Server is a running test server.
@@ -348,6 +354,9 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 		pid     int
 		ended   bool
 	)
+	// chClosed is closed once the exec's channel has been closed after
+	// the command's exit (ExitBeforeSignalReply waits for it).
+	chClosed := make(chan struct{})
 	for req := range reqs {
 		switch req.Type {
 		case "exec":
@@ -366,7 +375,7 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 					mu.Lock()
 					ended = true
 					mu.Unlock()
-				})
+				}, func() { close(chClosed) })
 				ok = err == nil
 			}
 			mu.Unlock()
@@ -406,6 +415,13 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 				ok = syscall.Kill(-pid, sig) == nil
 			}
 			mu.Unlock()
+			if ok && s.opts.ExitBeforeSignalReply {
+				select {
+				case <-chClosed:
+				case <-s.done:
+				case <-time.After(10 * time.Second):
+				}
+			}
 			if req.WantReply {
 				_ = req.Reply(ok, nil)
 			}
@@ -437,7 +453,7 @@ func (d *dropWriter) Write(p []byte) (int, error) {
 // that still holds stdout keeps the channel open. It returns the pid and
 // begin, which starts streaming the output and reporting the exit; the
 // caller answers the exec request first, then calls begin.
-func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (pid int, begin func(), err error) {
+func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended, closed func()) (pid int, begin func(), err error) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
 		return 0, nil, err
@@ -480,11 +496,11 @@ func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (
 	var copies sync.WaitGroup
 	copies.Add(2)
 	s.wg.Add(4)
-	return pid, func() { s.stream(ch, cmd, pid, inW, outR, errR, stdout, &copies, ended) }, nil
+	return pid, func() { s.stream(ch, cmd, pid, inW, outR, errR, stdout, &copies, ended, closed) }, nil
 }
 
 // stream copies the command's output to the channel and reports its exit.
-func (s *Server) stream(ch ssh.Channel, cmd *exec.Cmd, pid int, inW, outR, errR *os.File, stdout io.Writer, copies *sync.WaitGroup, ended func()) {
+func (s *Server) stream(ch ssh.Channel, cmd *exec.Cmd, pid int, inW, outR, errR *os.File, stdout io.Writer, copies *sync.WaitGroup, ended, closed func()) {
 	go s.pump(nil, inW, ch)
 	go s.pump(copies, stdout, outR)
 	go s.pump(copies, ch.Stderr(), errR)
@@ -499,6 +515,7 @@ func (s *Server) stream(ch ssh.Channel, cmd *exec.Cmd, pid int, inW, outR, errR 
 		copies.Wait()
 		_ = ch.CloseWrite()
 		_ = ch.Close()
+		closed()
 	}()
 }
 
