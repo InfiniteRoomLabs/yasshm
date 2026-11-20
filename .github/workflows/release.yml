@@ -1,0 +1,76 @@
+name: Release
+
+# A release is cut by an attended step: the operator pushes a tag named v<version>
+# (for example v0.1.0) on a commit that is on the default branch. Nothing else
+# triggers this workflow: not a branch push, not a pull request, not a schedule.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default; only the release job below asks for more.
+permissions:
+  contents: read
+
+# One release at a time: two tags pushed together queue instead of racing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # The same gate as every push (ci.yml is also a reusable workflow): a tag on a
+  # commit that does not pass `mise run check` is not released.
+  check:
+    name: check
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    name: release
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # The one credential: the workflow's own token. It reaches the steps below
+      # through the environment, never through a command line.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+      REPOSITORY: ${{ github.repository }}
+      TAG_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every branch and tag (origin/<branch> refs), so the default branch can be compared with the tag.
+          fetch-depth: 0
+          persist-credentials: false
+      # No cache in a release build: nothing from an earlier run goes into the files.
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install: true
+          cache: false
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "refusing: the tag must look like v1.2.3 or v1.2.3-rc.1" >&2
+            exit 1
+          fi
+          default_branch=$(gh api "repos/$REPOSITORY" --jq .default_branch)
+          if ! git merge-base --is-ancestor "$TAG_SHA" "refs/remotes/origin/$default_branch"; then
+            echo "refusing: the tagged commit is not on the default branch ($default_branch)" >&2
+            exit 1
+          fi
+      - name: Build
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}" mise run build
+          cat dist/SHA256SUMS
+      - name: Create the release
+        run: |
+          set -euo pipefail
+          flags=(--verify-tag --title "$TAG" --generate-notes)
+          if [[ "$TAG" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" dist/yasshm_*_linux_amd64 dist/yasshm_*_linux_arm64 dist/SHA256SUMS "${flags[@]}"

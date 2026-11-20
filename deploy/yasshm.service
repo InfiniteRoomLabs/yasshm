@@ -1,0 +1,110 @@
+# yasshm.service -- the hardened systemd unit (spec section 8).
+#
+# Install as /etc/systemd/system/yasshm.service. deploy/README.md has the steps
+# that must come first: the yasshm user and group, the binary at
+# /usr/local/bin/yasshm, /etc/yasshm/config.yaml, and the two directories named
+# in ReadWritePaths below with their modes.
+#
+# Paths are explicit (ReadWritePaths) and not StateDirectory= or LogsDirectory=.
+# The gateway refuses a data directory or a log directory with the wrong owner or
+# mode, and the audit log belongs on a file system of its own (docs/operator-guide.md).
+# systemd would create the directories itself with its own idea of owner and mode,
+# and would hide a mount that is missing. With ReadWritePaths a missing directory
+# stops the unit at start, which is what fails closed looks like here.
+
+[Unit]
+Description=yasshm, a policy-checked and audited SSH gateway for MCP clients
+Documentation=https://github.com/InfiniteRoomLabs/yasshm
+After=network-online.target
+Wants=network-online.target
+# Five failed starts in two minutes stop the restarts; `systemctl reset-failed
+# yasshm` clears it. A crash loop must not hammer the key-set URL or the audit log.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=yasshm
+Group=yasshm
+
+# A config that does not load keeps the service from starting at all, with the
+# problem lines in the journal.
+ExecStartPre=/usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml
+ExecStart=/usr/local/bin/yasshm serve --config /etc/yasshm/config.yaml
+
+Restart=on-failure
+RestartSec=5s
+
+# SIGTERM starts the graceful stop: running commands are ended and marked
+# killed within shutdown_grace_seconds (at most 300), then the gateway writes
+# gateway.stopped and exits. TimeoutStopSec is that maximum plus the 5 seconds
+# the gateway waits for requests still answering, plus margin, so systemd does not
+# send SIGKILL while the gateway is still writing its last audit event.
+KillSignal=SIGTERM
+TimeoutStopSec=330s
+
+# Do not set MCPGODEBUG (or any Environment= line for the gateway). The MCP SDK
+# reads MCPGODEBUG once at start and a malformed value stops the process.
+# The gateway needs no environment variable at all.
+
+# Filesystem: read-only everywhere except the data directory and the audit log's
+# directory. PrivateTmp hides /tmp. UMask keeps every file the service creates
+# private to its user (the gateway also sets its own modes).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/yasshm /var/log/yasshm
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+UMask=0077
+
+# No capabilities at all: the gateway binds an unprivileged loopback port and
+# execs nothing.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Kernel and host: nothing a network service needs to touch.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# Processes and memory. The binary is static Go with a pure-Go SQLite driver;
+# it needs no executable-and-writable memory, no namespaces, no real-time
+# scheduling and no set-id files.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RemoveIPC=yes
+
+# Network: the gateway dials SSH targets and the key-set URL over IPv4 and IPv6,
+# and AF_UNIX is for the C library and the logger.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# System calls: the usual service set without the privileged and resource groups.
+# A denied call gets EPERM and not SIGSYS, so a call this list missed shows up as
+# an error in the journal and does not kill the gateway.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# IPAddressDeny=any is left out on purpose. The gateway must reach every SSH
+# target and the edge's key-set host, so a deny-all needs an allow list that is
+# the operator's to write. A template, with documentation addresses:
+#
+#   IPAddressDeny=any
+#   IPAddressAllow=192.0.2.0/24 2001:db8::/32 127.0.0.0/8 ::1
+#
+# Name the targets' networks, the resolver, and the address range of the key-set
+# host (the team domain), and test with `systemctl restart yasshm` before relying
+# on it.
+
+[Install]
+WantedBy=multi-user.target

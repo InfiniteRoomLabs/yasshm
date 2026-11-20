@@ -148,6 +148,79 @@ run_e2e() {
   echo "e2e: $got of $want end-to-end scenarios passed against the real binary in ${took}s (uid $(id -u))"
 }
 
+# The shipped deployment files (spec section 8): the tests of ./deploy (the
+# unit's directives, the example config through `config check`), the checks on
+# the workflow files (TestWorkflow* in internal/deprule: pinned actions,
+# read-only permissions, the release trigger), the limits and unit-timeout
+# tests that read the example (internal/config), and `systemd-analyze verify`
+# on a copy of the unit whose binary path points at a stub, where the tool
+# exists. verify exits 0 on an unknown directive and prints a warning, so any
+# output from it fails the step.
+run_deploy() {
+  echo "== deploy =="
+  local log tmp out
+  log=$(mktemp)
+  tmp=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$log' '$tmp'" RETURN
+  if ! (cd "$repo_root" && mise exec -- go test -count=1 -v ./deploy) >"$log" 2>&1; then
+    cat "$log"
+    echo "deploy: the deployment file tests failed" >&2
+    exit 1
+  fi
+  if [ "$(grep -cE '^--- PASS: Test(Unit|Example)' "$log" || true)" -lt 5 ]; then
+    cat "$log"
+    echo "deploy: fewer deployment file tests passed than expected" >&2
+    exit 1
+  fi
+  if ! (cd "$repo_root" && mise exec -- go test -count=1 -run '^(TestWorkflow|TestExample|TestUnitStopTimeout)' ./internal/deprule ./internal/config) >"$log" 2>&1; then
+    cat "$log"
+    echo "deploy: the workflow or example tests failed" >&2
+    exit 1
+  fi
+  if ! command -v systemd-analyze >/dev/null 2>&1; then
+    echo "check.sh: systemd-analyze is not installed here; the unit was not verified by systemd (the directive tests ran)"
+    return 0
+  fi
+  printf '#!/bin/sh\nexit 0\n' >"$tmp/yasshm"
+  chmod 755 "$tmp/yasshm"
+  sed "s#/usr/local/bin/yasshm#$tmp/yasshm#g" "$repo_root/deploy/yasshm.service" >"$tmp/yasshm.service"
+  out=$(systemd-analyze verify "$tmp/yasshm.service" 2>&1) || {
+    echo "$out" >&2
+    echo "deploy: systemd-analyze verify failed" >&2
+    exit 1
+  }
+  if [ -n "$out" ]; then
+    echo "$out" >&2
+    echo "deploy: systemd-analyze verify printed warnings" >&2
+    exit 1
+  fi
+  echo "deploy: systemd-analyze verify passed on deploy/yasshm.service ($(systemd-analyze --version | head -1))"
+}
+
+# The documentation checks (TestDocs* in internal/deprule): every relative link
+# in every Markdown file resolves (anchors too), every .md .yaml .yml .service
+# .sh and .toml file is ASCII, the template-placeholder grep is empty and the
+# prose is not hard-wrapped. The step fails unless the checks ran.
+run_docs() {
+  echo "== docs =="
+  local log
+  log=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$log'" RETURN
+  if ! (cd "$repo_root" && mise exec -- go test -count=1 -v -run '^TestDocs' ./internal/deprule) >"$log" 2>&1; then
+    cat "$log"
+    echo "docs: the documentation checks failed" >&2
+    exit 1
+  fi
+  if [ "$(grep -cE '^--- PASS: TestDocs' "$log" || true)" -lt 4 ]; then
+    cat "$log"
+    echo "docs: fewer documentation checks passed than expected" >&2
+    exit 1
+  fi
+  echo "docs: $(grep -cE '^--- PASS: TestDocs' "$log") documentation checks passed"
+}
+
 run_cover() {
   echo "== cover =="
   if [ ! -s "$coverage_profile" ]; then
@@ -206,7 +279,7 @@ run_arch() {
   # when this project has a Node test runner.
 }
 
-steps=(fmt lint skipcheck test sshd e2e cover vuln build arch)
+steps=(fmt lint skipcheck test sshd e2e deploy docs cover vuln build arch)
 
 run_step() {
   case "$1" in
@@ -216,6 +289,8 @@ run_step() {
   test) run_test ;;
   sshd) run_sshd ;;
   e2e) run_e2e ;;
+  deploy) run_deploy ;;
+  docs) run_docs ;;
   cover) run_cover ;;
   vuln) run_vuln ;;
   build) run_build ;;

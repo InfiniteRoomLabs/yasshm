@@ -1,0 +1,179 @@
+# config.example.yaml -- every key yasshm's config loader accepts, with synthetic values.
+#
+# Copy to /etc/yasshm/config.yaml and replace the values marked REPLACE. Nothing here is a
+# real host, account or key. `yasshm config check --config <file>` validates the file strictly:
+# an unknown key, a duplicate key, a wrong type, a missing required key, a YAML anchor or alias
+# is an error, and every problem is reported at once as `path.to.key: message (line N)`.
+# The file is one YAML document of at most 1 MiB. The service refuses a config file that group
+# or other can write: use mode 0640 (owner root, group yasshm) or 0600 (owner yasshm).
+#
+# Nothing in this file can be read or changed through the MCP tools: the tools expose only a
+# server's id, description, tags and access level.
+
+# version: the config format. Required. Must be 1.
+version: 1
+
+server:
+  # listen: the address and port the gateway binds. Required. It must be a loopback IP address
+  # (127.0.0.1 or ::1, a host name is refused), because the edge connector runs on the same host
+  # and forwards to it. Port 0 asks the kernel for a free port (tests only).
+  listen: 127.0.0.1:8822
+
+  # allow_non_loopback: optional, default false. When true, listen may be any address. Leave it
+  # off: this is a way to expose the gateway without the edge in front of it.
+  # allow_non_loopback: false
+
+  # data_dir: the directory for the job database (yasshm.db) and captured command output.
+  # Required. An absolute, clean path. The directory must exist, be owned by the service user
+  # and have mode 0700; the gateway refuses one that group or other can reach. One gateway per
+  # data directory.
+  data_dir: /var/lib/yasshm
+
+  # audit_log: the append-only JSONL audit log. Required. An absolute, clean path. The file is
+  # created with mode 0600. Its directory must exist, be owned by the service user and not be
+  # writable by group or other (use mode 0700). The gateway never rotates or reopens it.
+  audit_log: /var/log/yasshm/audit.jsonl
+
+auth:
+  # provider: the origin authentication. Required. The only value is cloudflare-access.
+  provider: cloudflare-access
+  cloudflare_access:
+    # team_domain: your Cloudflare Access team domain, a DNS host name (no scheme). Required.
+    # Tokens must name https://<team_domain> as their issuer, and the signing keys are fetched
+    # from https://<team_domain>/cdn-cgi/access/certs.
+    team_domain: example-team.cloudflareaccess.com
+
+    # audience: the AUD tag of the Access application that fronts the gateway. Required.
+    # 1 to 512 characters, no spaces. Every token must carry it in its aud claim.
+    audience: "REPLACE_WITH_THE_ACCESS_APPLICATION_AUD_TAG"
+
+    # certs_url: optional. Replaces the key-set URL above. For tests only: the gateway logs a
+    # warning at start when it is set, because whoever answers there decides which tokens are
+    # valid. Must be https (http only for a loopback IP address).
+    # certs_url: https://example.net/certs
+
+# tenants: exactly one tenant in this version. Required.
+tenants:
+  # id: the tenant's id. Required. Lower case letters, digits and hyphens, starting with a
+  # letter or digit, at most 63 characters. Tenant, identity and server ids all follow this rule.
+  - id: default
+
+    # principals: who may use this tenant. Required, at least one entry. Each entry has exactly
+    # one of email and common_name.
+    principals:
+      # email: an Access user, compared ignoring ASCII case. ASCII addresses only.
+      - email: operator@example.net
+      # common_name: an Access service token's client id. Map one only for a service token you
+      # created yourself: any token that carries common_name is treated as a service token.
+      # - common_name: REPLACE_WITH_THE_SERVICE_TOKEN_CLIENT_ID
+
+    # identities: the SSH accounts the gateway logs in as, by id. Required, at least one.
+    identities:
+      lab-look:
+        # user: the login name on the target. Required. The unprivileged look account: letters,
+        # digits, underscore, dot and hyphen, at most 32 characters, not starting with a digit.
+        user: look
+        # private_key_file: the gateway's private key for that account. Required. An absolute,
+        # clean path. An unencrypted key (no passphrase), a regular file owned by the service
+        # user with mode 0600 and at most 64 KiB. The gateway refuses a key group or other can read.
+        private_key_file: /etc/yasshm/keys/lab-look_ed25519
+
+    # servers: the targets. Required, at least one.
+    servers:
+      - # id: the id the assistant uses. Required. Unique in the tenant.
+        id: lab-1
+        # description: optional, at most 256 bytes, no control characters. Shown to the assistant.
+        description: Example lab host
+        # host: a DNS host name or an IP address. Required.
+        host: lab-1.example.net
+        # port: optional, default 22. 1 to 65535.
+        port: 22
+        # identity: the id of one of the identities above. Required.
+        identity: lab-look
+        # host_key: the target's pinned host key, one line in authorized_keys form (type and
+        # base64, a trailing comment is dropped; no options, no certificate). Exactly one of
+        # host_key and known_hosts_file is required. There is no trust on first use: get the
+        # line from the target (deploy/README.md) and compare it out of band.
+        host_key: "ssh-ed25519 REPLACE_WITH_THE_TARGETS_HOST_KEY_LINE_FROM_ssh-keyscan_OR_THE_HOST"
+        # known_hosts_file: instead of host_key, an absolute path to an OpenSSH known_hosts file
+        # that lists this server's host:port. At most 1 MiB, not writable by group or other, no
+        # @cert-authority line.
+        # known_hosts_file: /etc/yasshm/known_hosts
+        # access: the access level the server grants. Required. Only look is supported in this
+        # version; full is refused ("access level full is not supported in this version").
+        access: look
+        # tags: optional, at most 16, each following the id rule. Shown to the assistant.
+        tags: [lab]
+
+    # policy: the operator's additions to the built-in guard rails. Optional. The built-in lists
+    # always apply. The denylists are a guard rail, not a boundary.
+    policy:
+      # deny_commands: RE2 regular expressions matched, unanchored, against the whole command
+      # string. At most 256 entries of at most 1024 bytes. An entry that matches the empty string
+      # is refused. Example: deny_commands: ['\bshutdown\b'].
+      deny_commands: []
+      # deny_paths: glob patterns for file transfer. At most 256 entries of at most 1024 bytes.
+      # A glob without a slash is matched against the file's base name. A glob with a slash
+      # starts with / or **/ and is matched against the whole cleaned path. ** is allowed only as
+      # the whole first element (any depth before the rest) or the whole last element (the
+      # directory and everything under it). Example: deny_paths: ['/srv/secret/**', '*.pem'].
+      deny_paths: []
+
+    # limits: per-tenant limits. Optional; an absent key takes its default. Every value is an
+    # integer inside its range (inclusive). They are all written out here at their defaults so
+    # each key is visible. Four pairs must also hold: default_wait_seconds <= max_wait_seconds,
+    # default_timeout_seconds <= max_timeout_seconds, max_concurrent_per_server <=
+    # max_concurrent_commands, max_output_bytes <= max_data_bytes. And max_wait_seconds plus twice
+    # connect_timeout_seconds must not exceed 120 (the defaults give 80): run_command connects
+    # before it waits, and the edge closes a request that sends nothing for 125 seconds.
+    limits:
+      # How long run_command and read_output wait when the caller names no wait. 0 answers at once.
+      # Default 30, range 0 to 110.
+      default_wait_seconds: 30
+      # The longest a caller may ask run_command or read_output to wait. Kept under the edge's 125
+      # second read timeout and the client's 240 second tool-call limit.
+      # Default 60, range 1 to 110.
+      max_wait_seconds: 60
+      # How long a command may run when the caller names no timeout, in seconds.
+      # Default 600, range 1 to 86400.
+      default_timeout_seconds: 600
+      # The longest timeout a caller may ask for, in seconds.
+      # Default 3600, range 1 to 86400.
+      max_timeout_seconds: 3600
+      # Commands running at once for the tenant (one SSH connection each). Over it: busy.
+      # Default 4, range 1 to 64.
+      max_concurrent_commands: 4
+      # Commands, probes and file transfers running at once on one server. Over it: busy.
+      # Default 2, range 1 to 64.
+      max_concurrent_per_server: 2
+      # The longest command text accepted, in bytes.
+      # Default 8192, range 1 to 65536.
+      max_command_bytes: 8192
+      # The most output stored per command, in bytes (16 MiB by default). Output past it is dropped
+      # and the command is marked truncated.
+      # Default 16777216, range 1024 to 1073741824.
+      max_output_bytes: 16777216
+      # The most bytes in one tool result, in bytes. The client caps a result at about 150000
+      # characters.
+      # Default 100000, range 4096 to 140000.
+      max_result_bytes: 100000
+      # How many days a finished command and its output are kept.
+      # Default 7, range 1 to 3650.
+      retention_days: 7
+      # The most the tenant's records and stored output may hold, in bytes (1 GiB by default); the
+      # oldest finished commands go first, and a new command is refused (busy) while usage is at it.
+      # Default 1073741824, range 1048576 to 1099511627776.
+      max_data_bytes: 1073741824
+      # The most upload_file may send, in bytes (1 MiB). upload_file is refused in this version.
+      # Default 1048576, range 1 to 1048576.
+      max_upload_bytes: 1048576
+      # How long a killed or timed-out command gets between TERM and KILL, in seconds.
+      # Default 5, range 1 to 60.
+      kill_grace_seconds: 5
+      # How long the gateway waits to connect and to start a command on a target, in seconds.
+      # Default 10, range 1 to 59.
+      connect_timeout_seconds: 10
+      # How long a graceful stop waits for running commands to end, in seconds. The systemd unit's
+      # TimeoutStopSec must stay above its largest value (300) plus 5.
+      # Default 20, range 1 to 300.
+      shutdown_grace_seconds: 20
