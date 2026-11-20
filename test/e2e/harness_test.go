@@ -708,6 +708,7 @@ type (
 	readResult struct {
 		CommandID  string `json:"command_id"`
 		Status     string `json:"status"`
+		ErrorCode  string `json:"error_code"`
 		ExitCode   *int   `json:"exit_code"`
 		Data       string `json:"data"`
 		Offset     int64  `json:"offset"`

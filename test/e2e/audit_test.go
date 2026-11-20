@@ -147,3 +147,51 @@ func lastAuthAcceptedMax(t *testing.T, f *fixture) int {
 	}
 	return len(last) - len(rec.TS) + maxTSLen + 1
 }
+
+// TestE2EFileSizeLimit is the full-disk behaviour against the real binary
+// (Phase 6 hardening): a normal user cannot mount a small file system, so
+// the gateway's RLIMIT_FSIZE is lowered while a command writes, and the
+// kernel refuses (EFBIG) every write that would take its output file past
+// the limit, the way a full disk refuses it (ENOSPC). The command ends
+// with status error, the output up to the limit stays readable to its end,
+// its command.finished event is written, and the gateway keeps serving.
+func TestE2EFileSizeLimit(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	g := f.start(t)
+	g.waitReady(t)
+	c := connect(t, g.edge(t))
+	srv := f.target("lab-1")
+	const limit = 128 << 10
+	// The command waits for a file the test creates once the limit is
+	// set, then writes more than the limit.
+	r := c.runCommand(t, "lab-1", "echo start; while [ ! -e go ]; do sleep 0.05; done; head -c 300000 /dev/zero | tr '\\0' b; echo end", map[string]any{"wait_seconds": 0})
+	c.waitOutput(t, r.CommandID, "start")
+	limitFileSize(t, g.pid, limit)
+	if err := os.WriteFile(srv.Root+"/go", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("edge/the command ends error with its output kept up to the limit", func(t *testing.T) {
+		c.waitStatus(t, r.CommandID, callBound)
+		o := c.readOutput(t, r.CommandID, map[string]any{"offset": -4})
+		if o.Status != "error" || o.ErrorCode != "internal" || o.Size != limit || o.Data != "bbbb" || !o.EOF {
+			t.Fatalf("read = %+v", o)
+		}
+		found := false
+		lines, _ := f.auditLog(t)
+		for _, l := range lines {
+			found = found || (l.Event == "command.finished" && l.CommandID == r.CommandID && l.Status == "error")
+		}
+		if !found {
+			t.Fatal("no command.finished with status error")
+		}
+	})
+	t.Run("happy/the gateway keeps serving", func(t *testing.T) {
+		if r := c.runCommand(t, "lab-1", "echo after", map[string]any{"wait_seconds": 10}); r.Status != "succeeded" || r.Stdout != "after\n" {
+			t.Fatalf("run = %+v", r)
+		}
+		if code := g.stop(); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+	})
+}

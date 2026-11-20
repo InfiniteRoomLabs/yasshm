@@ -140,4 +140,29 @@ func TestE2EEveryTool(t *testing.T) {
 			t.Fatalf("exit %d", code)
 		}
 	})
+	// Spec 6: tokens and key material never appear in logs, errors or the
+	// audit log. Every token the edge sent starts with the same encoded
+	// JOSE header ("eyJ..."); the key material is the body of the
+	// private key file the gateway read.
+	t.Run("raging/no token or key material in the logs or the audit log", func(t *testing.T) {
+		key, err := os.ReadFile(srv.ClientKeyFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		audit, err := os.ReadFile(f.audit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		header := strings.SplitN(f.is.For(operator).Sign(), ".", 2)[0]
+		for name, text := range map[string]string{"stderr": g.stderr(), "audit log": string(audit)} {
+			if strings.Contains(text, header) || strings.Contains(text, "eyJ") {
+				t.Errorf("the %s holds a token", name)
+			}
+			for _, l := range strings.Split(string(key), "\n") {
+				if len(l) >= 16 && !strings.HasPrefix(l, "-----") && strings.Contains(text, l) {
+					t.Errorf("the %s holds a line of the private key", name)
+				}
+			}
+		}
+	})
 }
