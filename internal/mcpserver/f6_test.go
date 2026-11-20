@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -147,5 +148,40 @@ func TestF6IdentityReachesHandler(t *testing.T) {
 	defer mu.Unlock()
 	if builds == 0 {
 		t.Fatal("getServer never built a server")
+	}
+}
+
+// TestF5LocalhostProtection records why the gateway sets
+// DisableLocalhostProtection: with the SDK's default, a loopback listener
+// refuses a request whose Host is not loopback -- every request the edge
+// forwards, since it carries the public name.
+func TestF5LocalhostProtection(t *testing.T) {
+	s := mcp.NewServer(&mcp.Implementation{Name: "f5", Version: "test"}, nil)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		host string
+		code int
+	}{
+		{"edge.example.net", http.StatusForbidden},
+		{"127.0.0.1", http.StatusOK},
+	} {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = tc.host
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != tc.code {
+			t.Fatalf("Host %s: status %d, want %d", tc.host, resp.StatusCode, tc.code)
+		}
 	}
 }

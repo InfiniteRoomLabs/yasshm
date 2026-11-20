@@ -71,7 +71,7 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 | Architecture model / project config / generated diagrams | `docs/architecture/*.c4`, `docs/architecture/likec4.config.json`, `docs/architecture/generated/` |
 | Testing rules | `TESTING.md` |
 | Build, fuzz, lint config | `scripts/build.sh`, `scripts/fuzz.sh`, `.golangci.yml` |
-| Code | `cmd/yasshm/`, `internal/<package>/`, test support in `internal/testkit/`, end-to-end tests in `test/e2e/` |
+| Code | `cmd/yasshm/`, `internal/<package>/` (the MCP endpoint is `internal/mcpserver`, `serve` is `internal/cli/serve.go`), test support in `internal/testkit/` (`edgetest` is the stand-in edge), end-to-end tests in `test/e2e/` |
 | Operator manual tests (written in Phase 7, never run by the loop) | `test/manual/` |
 | Harness bootstrap (marketplaces, plugins, MCP allowlist) | `.claude/settings.json`, `.mcp.json` |
 | Codex brief | `AGENTS.md` |
@@ -86,6 +86,7 @@ mise run test                         # go test -race with coverage.out (the gat
 mise run lint                         # golangci-lint
 mise run fuzz                         # every Fuzz target for 30 seconds each; passes when there are none
 mise exec -- go version               # any Go command goes through mise
+yasshm serve --config <file>          # the gateway; JSON logs on stderr, SIGTERM for a graceful stop
 mise run arch:dev                     # live diagram browser at http://localhost:5173
 mise run arch:validate                # LikeC4 syntax + layout-drift check
 mise run arch:fmt                     # format .c4 sources in place
@@ -133,8 +134,12 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - `leakcheck.Check` compares every goroutine of the process, so a parallel test's check counts other tests' engines as leaks (seen as 5-second failures under `-count=50`): use it only in tests that do not call `t.Parallel` (`TestLeaks` in `internal/jobs`).
 - Job engine test seams (`hooks`: the store's end and delete writes, a point in `Kill`) are read under the engine lock; replace them with `setHooks` in tests, never by assigning a field while the janitor runs. A finishing command wakes the janitor: call `h.settle()` before moving the clock or replacing a janitor hook, or a pass in flight races the test.
 - `go tool cover -func` on `coverage.out` reports a lower total than the gate (it counts duplicate blocks and `internal/testkit`); read the gate's `cover` line.
-- Cloudflare Access service tokens carry no `nbf` (vendor page, 2026-11-20): `internal/auth` requires `nbf` on user tokens only; do not "tighten" it to every token. Token minting in `internal/testkit/accesstest` is by hand (base64 + `crypto`), the only way to build `alg: none` and HS256-with-the-public-key; verification is go-jose only, and so is claim decoding (`go-jose/v4/json`: case-sensitive, duplicates refused) -- do not switch it back to `encoding/json`. `auth.Middleware` cannot flush the suppressed-rejections summary; Phase 5 should hold an `auth.NewGuard` and `Close` it at shutdown.
+- Cloudflare Access service tokens carry no `nbf` (vendor page, 2026-11-20): `internal/auth` requires `nbf` on user tokens only; do not "tighten" it to every token. Token minting in `internal/testkit/accesstest` is by hand (base64 + `crypto`), the only way to build `alg: none` and HS256-with-the-public-key; verification is go-jose only, and so is claim decoding (`go-jose/v4/json`: case-sensitive, duplicates refused) -- do not switch it back to `encoding/json`. `auth.Middleware` cannot flush the suppressed-rejections summary; `serve` holds an `auth.NewGuard` and `Close`s it at shutdown.
 - Never free a port a test still dials: closing a listener and dialling its port races with every other test (the kernel can hand the port to another server, seen once as a "stopped" issuer that served keys). For "nothing answers here" use `internal/testkit/loopback.RefusingPort` (bound, never listening: refused at once, unbindable by others); `accesstest`'s `Down` keeps its listener and resets connections.
+- MCP Go SDK v1.8.0: tools are registered with the untyped `Server.AddTool` and decode their own arguments (the typed `mcp.AddTool` answers a schema violation with a message that echoes the input); the SDK has no `recover`, so `mcpserver.invoke` recovers; it calls `getServer` twice per request, so the per-request server is built in `serveMCP` and only read back from the context; it logs every stateless session at INFO, filtered to WARN in the gateway; it overwrites `Cache-Control`, so `secureWriter` sets the security headers at `WriteHeader`.
+- A tool result's size is `max_result_bytes` minus 512 bytes for the JSON-RPC envelope, counted at what JSON encoding can cost (6 bytes for `<`, `>`, `&`, control characters and U+FFFD, both copies: structured and text); a change to a result's fields must keep `TestResultSize` green at 4096 and 140000.
+- `get_server_info` never shows the probe's login name (it is the configured user, D8); the D8 marker test fails if it does.
+- A test that writes a config for `serve` sets `certs_url` to the local issuer or a `loopback.RefusingPort` URL: without it the authenticator fetches the real team domain's key set.
 - The template-placeholder check must keep printing nothing: `grep -rEn '<(project|one-line-description|toolchain|gate-steps|repo|slug)>' --exclude-dir=.git .`. Write per-phase slots as `<n>` and `<name>`, never with one of those six words.
 
 ## If you break something

@@ -6,7 +6,7 @@ MIT licensed. Built by [Infinite Room Labs](https://github.com/InfiniteRoomLabs)
 
 ## Status
 
-Under construction. The binary has `version` and `config check --config <file>`, which validates a config file strictly (every problem reported at once, one line each) and checks its private key and known_hosts files without connecting anywhere. Built so far: the tenant model (`internal/tenant`), the config loader (`internal/config`), the policy engine with its command and path guard rails (`internal/policy`), the append-only audit log (`internal/audit`), the SSH layer (`internal/sshclient`: pinned host keys, commands stopped with the SSH signal request, SFTP, a fixed probe), tested against an in-process server and, in CI, a real OpenSSH `sshd`, and the job engine (`internal/jobs` with the SQLite record store `internal/store`: commands that outlive a call, paged output, kill, limits, recovery after a restart, retention), and the authenticator (`internal/auth`: verifies the Cloudflare Access token on every request against a cached, rate-limited key set and maps it to a tenant), tested against a local token issuer. The MCP endpoint comes next, so there is still nothing to deploy. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
+Under construction. The binary has `serve --config <file>`, which serves the eight MCP tools over Streamable HTTP on a loopback address behind the origin's token check, `version` and `config check --config <file>`, which validates a config file strictly (every problem reported at once, one line each) and checks its private key and known_hosts files without connecting anywhere. Built so far: the tenant model (`internal/tenant`), the config loader (`internal/config`), the policy engine with its command and path guard rails (`internal/policy`), the append-only audit log (`internal/audit`), the SSH layer (`internal/sshclient`: pinned host keys, commands stopped with the SSH signal request, SFTP, a fixed probe), tested against an in-process server and, in CI, a real OpenSSH `sshd`, and the job engine (`internal/jobs` with the SQLite record store `internal/store`: commands that outlive a call, paged output, kill, limits, recovery after a restart, retention), and the authenticator (`internal/auth`: verifies the Cloudflare Access token on every request against a cached, rate-limited key set and maps it to a tenant), tested against a local token issuer, and the MCP endpoint (`internal/mcpserver`: the eight tools, `/mcp` and `/healthz`), tested through the SDK's own client and a stand-in edge. End-to-end tests and the deployment examples come next, so there is still nothing to deploy. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
 
 ## What v0.1 will be
 
@@ -25,6 +25,21 @@ git clone https://github.com/InfiniteRoomLabs/yasshm.git
 cd yasshm
 scripts/bootstrap.sh   # installs mise if needed, then the pinned toolchain
 mise run check
+```
+
+## Run it locally
+
+`serve` needs a config whose `listen` is a loopback address, an existing data directory with mode 0700 and an audit log path, all owned by the user running it. Every request to `/mcp` must carry a Cloudflare Access token for the configured team domain and audience, so a local smoke test can only reach `/healthz`; the test suites drive the tools through a local token issuer (`internal/testkit/accesstest`) and a stand-in edge (`internal/testkit/edgetest`). A sketch with synthetic values only:
+
+```sh
+install -d -m 0700 /tmp/yasshm-data
+# config.yaml as in spec section 5.1, with
+#   listen: 127.0.0.1:8822, data_dir: /tmp/yasshm-data, audit_log: /tmp/yasshm-audit.jsonl
+yasshm config check --config config.yaml
+yasshm serve --config config.yaml 2>serve.log &
+curl -s http://127.0.0.1:8822/healthz   # {"status":"ok","version":"dev"} once the key set is loaded
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8822/mcp   # 401: no token
+kill -TERM %1                            # graceful: gateway.stopped in the audit log
 ```
 
 ## Architecture
