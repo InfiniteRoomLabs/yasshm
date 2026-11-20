@@ -26,10 +26,15 @@ graph TB
   Yasshm.Auth -. "`writes auth.accepted before acting and 
 auth.rejected`" .-> Yasshm.Audit
   Yasshm.Tools -. "`checks grant, access level and denylist`" .-> Yasshm.Policy
-  Yasshm.Tools -. "`submits and queries commands`" .-> Yasshm.Jobs
-  Yasshm.Tools -. "`appends one event per call`" .-> Yasshm.Audit
+  Yasshm.Tools -. "`starts, waits for, pages, lists and 
+kills commands`" .-> Yasshm.Jobs
+  Yasshm.Tools -. "`transfers files over SFTP and probes 
+servers`" .-> Yasshm.Ssh
+  Yasshm.Tools -. "`writes tool.called before acting, 
+policy.denied, tool.failed and the file 
+events`" .-> Yasshm.Audit
   Yasshm.Policy -. "`reads tenants, grants and rules`" .-> Yasshm.Config
-  Yasshm.Jobs -. "`runs commands and transfers files`" .-> Yasshm.Ssh
+  Yasshm.Jobs -. "`runs and signals commands`" .-> Yasshm.Ssh
   Yasshm.Jobs -. "`records command state`" .-> Yasshm.Store
   Yasshm.Jobs -. "`streams captured output`" .-> Yasshm.Outputs
   Yasshm.Jobs -. "`writes command events before acting`" .-> Yasshm.Audit

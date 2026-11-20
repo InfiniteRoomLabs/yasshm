@@ -29,9 +29,8 @@ model {
     description 'Self-hosted MCP gateway that runs policy-checked, audited commands on configured SSH hosts'
 
     http = component 'MCP endpoint' {
-      #planned
-      technology 'Go net/http, MCP Go SDK, Streamable HTTP'
-      description 'Serves the MCP protocol, health checks and graceful shutdown'
+      technology 'Go net/http, MCP Go SDK v1.8.0, stateless Streamable HTTP with JSON responses (internal/mcpserver, internal/cli serve)'
+      description 'POST /mcp behind the auth guard, GET /healthz, everything else 404; body, header and concurrency caps; builds one MCP server per request from the verified principal; serve wires it and shuts down gracefully'
     }
 
     auth = component 'Authenticator' {
@@ -40,9 +39,8 @@ model {
     }
 
     tools = component 'Tool handlers' {
-      #planned
-      technology 'MCP tools'
-      description 'The eight tools: list_servers, run_command, read_output, list_commands, kill_command, get_server_info, upload_file, download_file'
+      technology 'Go (internal/mcpserver)'
+      description 'The eight tools: list_servers, run_command, read_output, list_commands, kill_command, get_server_info, upload_file, download_file; one call path: tool.called, policy, then the action; results sized to max_result_bytes'
     }
 
     policy = component 'Policy engine' {
@@ -83,9 +81,10 @@ model {
     http -> auth 'verifies every request'
     http -> tools 'dispatches tool calls'
     tools -> policy 'checks grant, access level and denylist'
-    tools -> jobs 'submits and queries commands'
-    tools -> audit 'appends one event per call'
-    jobs -> ssh 'runs commands and transfers files'
+    tools -> jobs 'starts, waits for, pages, lists and kills commands'
+    tools -> audit 'writes tool.called before acting, policy.denied, tool.failed and the file events'
+    tools -> ssh 'transfers files over SFTP and probes servers'
+    jobs -> ssh 'runs and signals commands'
     jobs -> store 'records command state'
     jobs -> outputs 'streams captured output'
     jobs -> audit 'writes command events before acting'
