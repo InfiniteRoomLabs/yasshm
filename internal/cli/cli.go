@@ -31,6 +31,7 @@ const (
 const usage = `usage: yasshm <command>
 
 commands:
+  serve --config <file>          serve the MCP endpoint until SIGTERM or SIGINT
   config check --config <file>   validate a config file (exit 0 valid, 1 invalid)
   version                        print the version, commit and build date
   help                           print this message (also -h, --help)
@@ -57,6 +58,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return writeFailed(stderr, err)
 		}
 		return exitOK
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
 	case "version":
@@ -117,11 +120,7 @@ func runConfigCheck(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return exitError
 	}
-	servers := 0
-	for i := range cfg.Tenants {
-		servers += len(cfg.Tenants[i].Servers)
-	}
-	if _, err := fmt.Fprintf(stdout, "config ok: %s, %s\n", plural(len(cfg.Tenants), "tenant"), plural(servers, "server")); err != nil {
+	if _, err := fmt.Fprintf(stdout, "config ok: %s, %s\n", plural(len(cfg.Tenants), "tenant"), plural(serverCount(cfg.Tenants), "server")); err != nil {
 		return writeFailed(stderr, err)
 	}
 	return exitOK

@@ -5,10 +5,17 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/configtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 )
 
 // runMainEnv makes the test binary act as yasshm: TestMain calls main
@@ -73,4 +80,88 @@ func TestConfigCheckOnDisk(t *testing.T) {
 			t.Fatalf("code %d", code)
 		}
 	})
+}
+
+// TestServeSignal runs the real entry point's serve in a child process and
+// stops it with SIGTERM: it exits 0 and the audit log ends with
+// gateway.stopped for a signal. The key set URL is a loopback port that
+// refuses connections, so nothing outside the machine is reached.
+func TestServeSignal(t *testing.T) {
+	files := configtest.Write(t)
+	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auditLog := filepath.Join(dir, "audit.jsonl")
+	b, err := os.ReadFile(files.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.NewReplacer(
+		"listen: 127.0.0.1:8822", "listen: 127.0.0.1:0",
+		"data_dir: /var/lib/yasshm", "data_dir: "+data,
+		"audit_log: /var/log/yasshm/audit.jsonl", "audit_log: "+auditLog,
+		"audience: "+configtest.Audience, "audience: "+configtest.Audience+"\n    certs_url: http://127.0.0.1:"+strconv.Itoa(loopback.RefusingPort(t))+"/certs",
+	).Replace(string(b))
+	cfg := filepath.Join(dir, "config.yaml")
+	if werr := os.WriteFile(cfg, []byte(text), 0o600); werr != nil { //nolint:gosec // G703: a path under t.TempDir
+		t.Fatal(werr)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "serve", "--config", cfg) //nolint:gosec // G204: the test binary itself, with test arguments
+	cmd.Env = append(os.Environ(), runMainEnv+"=1")
+	var errb lockedBuffer
+	cmd.Stderr = &errb
+	if serr := cmd.Start(); serr != nil {
+		t.Fatal(serr)
+	}
+	if !leakcheck.Poll(30*time.Second, func() bool { return strings.Contains(errb.String(), `"msg":"listening"`) }) {
+		_ = cmd.Process.Kill()
+		t.Fatalf("serve never listened:\n%s", errb.String())
+	}
+	if serr := cmd.Process.Signal(syscall.SIGTERM); serr != nil {
+		t.Fatal(serr)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case werr := <-done:
+		if werr != nil {
+			t.Fatalf("exit: %v\n%s", werr, errb.String())
+		}
+	case <-time.After(60 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("serve did not stop:\n%s", errb.String())
+	}
+	log, err := os.ReadFile(auditLog) //nolint:gosec // G304: the test's own audit log
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(log)), "\n")
+	if !strings.Contains(lines[0], `"event":"gateway.started"`) || !strings.Contains(lines[len(lines)-1], `"event":"gateway.stopped","reason":"signal"`) {
+		t.Fatalf("audit log:\n%s", log)
+	}
+}
+
+// lockedBuffer is a buffer a child process's output can be copied into
+// while the test reads it.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
