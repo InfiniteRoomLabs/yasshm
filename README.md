@@ -6,15 +6,38 @@ MIT licensed. Built by [Infinite Room Labs](https://github.com/InfiniteRoomLabs)
 
 ## Status
 
-Under construction. The binary has `serve --config <file>`, which serves the eight MCP tools over Streamable HTTP on a loopback address behind the origin's token check, `version` and `config check --config <file>`, which validates a config file strictly (every problem reported at once, one line each) and checks its private key and known_hosts files without connecting anywhere. Built so far: the tenant model (`internal/tenant`), the config loader (`internal/config`), the policy engine with its command and path guard rails (`internal/policy`), the append-only audit log (`internal/audit`), the SSH layer (`internal/sshclient`: pinned host keys, commands stopped with the SSH signal request, SFTP, a fixed probe), tested against an in-process server and, in CI, a real OpenSSH `sshd`, and the job engine (`internal/jobs` with the SQLite record store `internal/store`: commands that outlive a call, paged output, kill, limits, recovery after a restart, retention), and the authenticator (`internal/auth`: verifies the Cloudflare Access token on every request against a cached, rate-limited key set and maps it to a tenant), tested against a local token issuer, and the MCP endpoint (`internal/mcpserver`: the eight tools, `/mcp` and `/healthz`), tested through the SDK's own client and a stand-in edge. End-to-end tests and the deployment examples come next, so there is still nothing to deploy. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap is in [GOAL.md](GOAL.md), and the current state is in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
+**Version 0.1 is built. It has not been released or deployed.** The code, the tests and the install material are in this repository and the gate is green; no release has been cut, no gateway has run against a real edge or a real target, and the manual tests that would show that (`test/manual/`) have not been run. Treat it as release-candidate software until they have.
 
-## What v0.1 will be
+The binary has `serve --config <file>` (the gateway), `config check --config <file>` (strict validation of a config and the key files it names, without connecting anywhere) and `version`. The design is in [docs/superpowers/specs/2026-11-18-yasshm-design.md](docs/superpowers/specs/2026-11-18-yasshm-design.md), the roadmap in [GOAL.md](GOAL.md) and the current state in [docs/progress.md](docs/progress.md). The plan is on the `feat/yasshm-mvp` branch; the build happens on a `claude/...` working branch until the first release.
+
+## Documentation
+
+- [docs/operator-guide.md](docs/operator-guide.md): what yasshm is and is not, the config reference, adding a server, the audit log, running and upgrading, connecting a Claude custom connector, troubleshooting by error code.
+- [deploy/README.md](deploy/README.md): the install steps (user, directories and modes, the binary and its checksum, the key, the target account, the unit, the edge), with [the unit](deploy/yasshm.service) and [an example config](deploy/config.example.yaml).
+- [SECURITY.md](SECURITY.md): the threat model, what is and is not guaranteed and the test behind each guarantee, and how to report a vulnerability.
+- [TESTING.md](TESTING.md): how the project is tested, and the operator's manual tests in [test/manual](test/manual).
+- [The design spec](docs/superpowers/specs/2026-11-18-yasshm-design.md) and [the architecture diagrams](docs/architecture/README.md).
+
+## What v0.1 does
 
 - One static Go binary, run by systemd on a host you control, listening on loopback only.
 - Reached through an identity-aware edge (Cloudflare Tunnel plus Access); yasshm verifies the edge's signed token on every request.
 - Eight MCP tools over Streamable HTTP: `list_servers`, `run_command`, `read_output`, `list_commands`, `kill_command`, `get_server_info`, `upload_file`, `download_file`.
 - Read-only by construction: commands run as an unprivileged account on the target, behind a denylist. Write access is designed in and switched off.
 - Job control for commands that outlive a tool call, and an append-only audit log of everything asked and done.
+
+The eight tools:
+
+| Tool | Needs | What it does |
+|---|---|---|
+| `list_servers` | a signed-in caller | Lists your tenant's servers: id, description, tags, access level. |
+| `get_server_info` | `look` | Probes a server (reachable, host key check, kernel, architecture, OS, uptime). |
+| `run_command` | `look` | Runs a shell command as the server's unprivileged account, waits a bounded time, returns its status and first page of output. |
+| `read_output` | `look` | Pages through a command's output. |
+| `list_commands` | `look` | Lists commands, newest first. |
+| `kill_command` | `look` | Sends TERM, INT or KILL to a running command. |
+| `download_file` | `look` | Reads a regular file over SFTP, behind a path denylist. |
+| `upload_file` | `full` | Refused in v0.1: no server can grant `full`. |
 
 The denylist is a guard rail, not a sandbox: what a command can change is decided by the account it runs as. Read the security model in the spec (section 6) before pointing this at a machine you care about.
 
@@ -29,22 +52,35 @@ scripts/bootstrap.sh   # installs mise if needed, then the pinned toolchain
 mise run check
 ```
 
-## Run it locally
+## Quick start
 
-`serve` needs a config whose `listen` is a loopback address, an existing data directory with mode 0700 and an audit log path, all owned by the user running it. Every request to `/mcp` must carry a Cloudflare Access token for the configured team domain and audience, so a local smoke test can only reach `/healthz`; the test suites drive the tools through a local token issuer (`internal/testkit/accesstest`) and a stand-in edge (`internal/testkit/edgetest`). A sketch with synthetic values only:
+This runs the gateway on your own machine, on loopback, with a made-up target. It shows the build, the config check and the health endpoint; it cannot show a tool call, because every request to `/mcp` must carry a Cloudflare Access token for your team domain and audience, which only the real edge issues. A tool call is exercised by the test suites (through a local token issuer and a stand-in edge) and, for real, by the manual tests.
+
+You need `scripts/bootstrap.sh` run once (it installs `mise` and the pinned Go), and `ssh-keygen` for the throwaway keys.
 
 ```sh
-install -d -m 0700 /tmp/yasshm-data
-# The version is what the binary was stamped with: the short commit for a
-# `mise run build` binary (for example "1d3b63c"), "dev" for `go run`.
-# config.yaml as in spec section 5.1, with
-#   listen: 127.0.0.1:8822, data_dir: /tmp/yasshm-data, audit_log: /tmp/yasshm-audit.jsonl
-yasshm config check --config config.yaml
-yasshm serve --config config.yaml 2>serve.log &
-curl -s 'http://127.0.0.1:8822/healthz'   # {"status":"ok","version":"<the build's version>"} once the key set is loaded
-curl -s -o /dev/null -w '%{http_code}\n' -X POST 'http://127.0.0.1:8822/mcp'   # 401: no token
-kill -TERM %1                            # graceful: gateway.stopped in the audit log
+mise run build                       # dist/yasshm_<version>_linux_{amd64,arm64} and dist/SHA256SUMS
+B=$(ls dist/yasshm_*_linux_amd64)    # use the _arm64 file on an arm64 machine
+$B version
+
+T=/tmp/yasshm-try
+mkdir -p $T/data $T/logs $T/keys && chmod 700 $T/data $T/logs
+ssh-keygen -q -t ed25519 -N '' -f $T/keys/lab-look_ed25519
+ssh-keygen -q -t ed25519 -N '' -f $T/fake-host                  # any public key line will do for a local try
+sed -e "s|/etc/yasshm/keys|$T/keys|" -e "s|/var/lib/yasshm|$T/data|" -e "s|/var/log/yasshm|$T/logs|" \
+    -e "s|\"ssh-ed25519 REPLACE_WITH_THE_TARGETS_HOST_KEY_LINE_FROM_ssh-keyscan_OR_THE_HOST\"|\"$(cut -d' ' -f1,2 $T/fake-host.pub)\"|" \
+    deploy/config.example.yaml > $T/config.yaml
+chmod 600 $T/config.yaml
+
+$B config check --config $T/config.yaml     # config ok: 1 tenant, 1 server
+$B serve --config $T/config.yaml 2>$T/serve.log &
+curl -s http://127.0.0.1:8822/healthz       # see below
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8822/mcp   # 401: no token
+kill -TERM %1                               # graceful stop; gateway.stopped is the last audit event
+cat $T/serve.log $T/logs/audit.jsonl
 ```
+
+With the example's made-up team domain the gateway cannot fetch Access's signing keys (it tries `https://example-team.cloudflareaccess.com/cdn-cgi/access/certs`), so `/healthz` answers `{"status":"degraded","detail":"key set not loaded","version":"..."}` with status 503 and `/mcp` refuses every request. With your real team domain and the Access application's AUD tag in the config, and a host that can reach the key set, `/healthz` answers `{"status":"ok","version":"..."}`. The version is what the binary was stamped with: the short commit for a `mise run build` binary, the tag for a release, `dev` for `go run`. To go on, follow [deploy/README.md](deploy/README.md).
 
 ## Architecture
 
@@ -53,7 +89,7 @@ The architecture is modelled as code with [LikeC4](https://likec4.dev) in `docs/
 ## Contributing
 
 - Toolchain via [mise](https://mise.jdx.dev/): `scripts/bootstrap.sh` or `mise install`. Go and golangci-lint are pinned in `mise.toml`; Node and pnpm are there only for LikeC4.
-- The gate: `mise run check` runs `fmt lint skipcheck test sshd e2e cover vuln build arch` and fails on a dirty tree; `mise run check -- <step>` runs one step. The `e2e` step builds the real binary and runs the end-to-end suite (`test/e2e`) against it. `mise run build` writes `dist/yasshm_<version>_linux_{amd64,arm64}` and `dist/SHA256SUMS`. See `TESTING.md` for the testing rules.
+- The gate: `mise run check` runs `fmt lint skipcheck test sshd e2e deploy docs cover vuln build arch` and fails on a dirty tree; `mise run check -- <step>` runs one step. The `e2e` step builds the real binary and runs the end-to-end suite (`test/e2e`) against it. The `deploy` step tests the unit and the example config and runs `systemd-analyze verify` where it exists; the `docs` step checks the Markdown links, ASCII and wrapping. `mise run build` writes `dist/yasshm_<version>_linux_{amd64,arm64}` and `dist/SHA256SUMS`. See `TESTING.md` for the testing rules.
 - Commits: [Conventional Commits](https://www.conventionalcommits.org/), imperative mood, scoped.
 - If you use Claude Code, install the [agent-ops marketplace](https://github.com/InfiniteRoomLabs/agent-ops) -- it provides the changelog guard that keeps `CHANGELOG.md` honest and the goal loop this repo is built with (`GOAL.md`).
 - `scripts/redaction-check.sh` (a pre-commit hygiene check) is optional for outside contributors; it no-ops when `REDACTION_TERMS_RESOLVER` is not set.

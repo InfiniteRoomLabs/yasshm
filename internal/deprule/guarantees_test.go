@@ -218,3 +218,36 @@ func TestSecurityModelTable(t *testing.T) {
 		}
 	})
 }
+
+// TestSecurityMDMatchesSpec keeps SECURITY.md's two tables (between the same
+// markers) equal to spec section 6's, row for row, so the threat model an
+// outsider reads is the one the tests keep true. SECURITY.md also says the
+// not-guaranteed sentence of the spec in its own paragraph.
+func TestSecurityMDMatchesSpec(t *testing.T) {
+	read := func(p string) string {
+		b, err := os.ReadFile(p) //nolint:gosec // G304: fixed repository paths
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	want, err := parseTables(read(specPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := parseTables(read(filepath.Join("..", "..", "SECURITY.md")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(want) < 13 {
+		t.Fatalf("the spec has %d rows", len(want))
+	}
+	if len(got) != len(want) {
+		t.Fatalf("SECURITY.md has %d rows, the spec %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d differs.\nSECURITY.md: %+v\nspec:        %+v", i+1, got[i], want[i])
+		}
+	}
+}

@@ -20,7 +20,8 @@ var repoRoot = filepath.Join("..", "..")
 // file that is new and not yet added is checked too.
 func trackedFiles(t *testing.T, root string) []string {
 	t.Helper()
-	cmd := exec.Command("git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	cmd := exec.Command("git", "-C", root, //nolint:gosec // G204: git with fixed arguments; root is this package's relative repository path or a test temp dir
+		"ls-files", "-z", "--cached", "--others", "--exclude-standard")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {

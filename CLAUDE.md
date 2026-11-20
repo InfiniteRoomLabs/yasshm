@@ -73,6 +73,7 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 | Build, fuzz, lint config | `scripts/build.sh`, `scripts/fuzz.sh`, `.golangci.yml` |
 | Code | `cmd/yasshm/`, `internal/<package>/` (the MCP endpoint is `internal/mcpserver`, `serve` is `internal/cli/serve.go`), test support in `internal/testkit/` (`edgetest` is the stand-in edge), end-to-end tests in `test/e2e/` |
 | Operator manual tests (written in Phase 7, never run by the loop) | `test/manual/` |
+| Install material and the operator's docs | `deploy/` (unit, example config, install steps), `docs/operator-guide.md`, `SECURITY.md`, `.github/workflows/release.yml` |
 | Harness bootstrap (marketplaces, plugins, MCP allowlist) | `.claude/settings.json`, `.mcp.json` |
 | Codex brief | `AGENTS.md` |
 
@@ -80,7 +81,7 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 
 ```bash
 scripts/bootstrap.sh                  # mise + pinned toolchain on a bare machine; no-op when current
-mise run check                        # the gate: fmt lint skipcheck test sshd e2e cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
+mise run check                        # the gate: fmt lint skipcheck test sshd e2e deploy docs cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
 mise run build                        # dist/yasshm_<version>_linux_{amd64,arm64} + dist/SHA256SUMS
 mise run test                         # go test -race with coverage.out (the gate's test step uses it)
 mise run lint                         # golangci-lint
@@ -155,6 +156,11 @@ gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs   # CI result with
 - Probes and file transfers hold a per-server slot (`max_concurrent_per_server`) in `mcpserver`; a test that runs several on one slow server gets `busy`.
 - `tenanttest.SSHOptions` waits 5 seconds for a signal's answer; a test against an `sshtest` `SilentSignal` server uses `tenanttest.ShortSSHOptions`.
 - `sshtest` kills a process group before it answers the signal request, so under load the exit and channel close can arrive first and the client's `SendRequest` returns `io.EOF`: `sshclient` then waits the request's bound for the exit before deciding. `sshtest.Options.ExitBeforeSignalReply` forces that order for tests.
+- The operator guide, the example config, the unit, `SECURITY.md` and the manual tests are held true by tests, not by care: `docs/operator-guide.md` has marker pairs (`config-reference`, `tools`, `statuses`, `audit-samples`, `reject-reasons`, `tool-codes`, `http-statuses`) that tests in `internal/config`, `internal/mcpserver`, `internal/store`, `internal/audit` and `internal/cli` compare with the code; a new config key, limit, tool, status, tool code, `auth.rejected` reason, audit event, fixed HTTP body or start-up failure reason needs its row in the guide in the same commit, and a changed audit line needs the guide's sample block regenerated (the failing test prints the lines). `SECURITY.md`'s two tables must equal the spec's section 6 tables.
+- `systemd-analyze verify` exits 0 on an unknown directive and only prints a warning, so the `deploy` step fails on any output from it. It cannot take `--root` here (no `sysinit.target`): the step verifies a copy of the unit whose binary path is a stub. Where `systemd-analyze` is absent the step says so in one line.
+- `release.yml` is never run by the loop (a tag is the operator's). `TestWorkflow*` in `internal/deprule` hold its rules: tag trigger only, every action pinned by a 40-hex SHA with its version in a comment, top-level permissions read-only, `contents: write` in the `release` job only, no `${{ }}` in a `run:` line, no secret but `GITHUB_TOKEN`. A new workflow follows them or the test fails.
+- A `systemctl restart` is a graceful stop and records running commands `killed`, not `lost`; a command reads `lost` only after the gateway died without one (MT-004 uses SIGKILL for that reason).
+- A manual test's `.results` file is empty until the operator runs it; `TestManualTests` accepts empty or valid logfmt lines, never a hand-edited one. Never write one of the six template words in angle brackets in a manual test: use `<hostname>`, `<server-id>`, `<operator-email>`.
 - The template-placeholder check must keep printing nothing: `grep -rEn '<(project|one-line-description|toolchain|gate-steps|repo|slug)>' --exclude-dir=.git .`. Write per-phase slots as `<n>` and `<name>`, never with one of those six words.
 
 ## If you break something
