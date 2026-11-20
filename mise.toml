@@ -42,7 +42,7 @@ description = "Live-reloading diagram browser at http://localhost:5173"
 run = "pnpm dlx --config.enable-global-virtual-store=false -y likec4@$LIKEC4_VERSION start"
 
 [tasks.build]
-description = "Build dist/yasshm_<version>_linux_{amd64,arm64} and dist/SHA256SUMS"
+description = "Build dist/: yasshm_<version>_linux_{amd64,arm64}, yasshm.service, config.example.yaml and SHA256SUMS"
 run = "scripts/build.sh"
 
 [tasks.test]

@@ -11,6 +11,8 @@ You need root on the gateway host, root (or a way to add one account and one `au
 | [yasshm.service](yasshm.service) | The hardened systemd unit. Install it as `/etc/systemd/system/yasshm.service`. |
 | [config.example.yaml](config.example.yaml) | A complete example config with a comment on every key. Copy it to `/etc/yasshm/config.yaml`. |
 
+Every release carries both files beside the binaries (as `yasshm.service` and `config.example.yaml`), and `SHA256SUMS` covers them. Install from the release's copies, not from a source tree that may have moved on: the steps below use the names the release gives them.
+
 ## 1. The user, the directories and their modes
 
 The gateway refuses to start when a file or directory it depends on is too open, so the modes below are not decoration.
@@ -37,7 +39,7 @@ The unit names `/var/lib/yasshm` and `/var/log/yasshm` in `ReadWritePaths` and d
 
 ## 2. The binary, from a release, with its checksum verified
 
-A release has two files, `yasshm_<version>_linux_amd64` and `yasshm_<version>_linux_arm64`, and `SHA256SUMS`; the version has no leading `v` (the tag `v0.1.0` gives `yasshm_0.1.0_linux_amd64`, and `yasshm version` prints `yasshm 0.1.0`). Download the file for your host (`uname -m` says `x86_64` for amd64 and `aarch64` for arm64) and `SHA256SUMS` from the same release into an empty directory, then:
+A release has five files: `yasshm_<version>_linux_amd64`, `yasshm_<version>_linux_arm64`, `yasshm.service`, `config.example.yaml` and `SHA256SUMS` (which lists the other four); the version has no leading `v` (the tag `v0.1.0` gives `yasshm_0.1.0_linux_amd64`, and `yasshm version` prints `yasshm 0.1.0`). Download the binary for your host (`uname -m` says `x86_64` for amd64 and `aarch64` for arm64), `yasshm.service`, `config.example.yaml` and `SHA256SUMS` from the same release into an empty directory, then:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
@@ -45,7 +47,7 @@ install -o root -g root -m 0755 yasshm_<version>_linux_amd64 /usr/local/bin/yass
 yasshm version
 ```
 
-`sha256sum` must say `OK` for the file you downloaded. `SHA256SUMS` comes from the same place as the binary, so the check catches a damaged or truncated download, not a tampered release; if that matters to you, build the files yourself from the tag (`mise run build` in a clone, with `VERSION` set to the version) and compare. `yasshm version` prints the version, the commit and the build date.
+`sha256sum` must say `OK` for each file you downloaded (the unit and the example config too: an unchecked unit is a file that runs as a service). `SHA256SUMS` comes from the same place as the binary, so the check catches a damaged or truncated download, not a tampered release; if that matters to you, build the files yourself from the tag (`mise run build` in a clone, with `VERSION` set to the version) and compare. `yasshm version` prints the version, the commit and the build date.
 
 ## 3. The gateway's SSH key
 
@@ -69,6 +71,8 @@ usermod -p '*' look
 ```
 
 `usermod -p '*'` leaves no password that can match, so there is no password login, and it does not lock the account (a locked account refuses key logins on a target whose `sshd` runs with `UsePAM no`). Keep the account out of every privileged group (`root`, `sudo`, `wheel`, `adm`, `docker`, `lxd`, `libvirt`, `kvm`, `disk`, `shadow` and the like) and give it no `sudo` rights.
+
+**If this target is the gateway host itself,** stop here and read [When a target is the gateway host itself](../docs/operator-guide.md#when-a-target-is-the-gateway-host-itself): that account is a local user of the gateway host and needs containing. Prefer a separate machine or VM.
 
 **The account must not be able to change which keys log in as it.** Any command the assistant runs as that account could otherwise add a key to its own `~/.ssh/authorized_keys` or remove `restrict`, and that opens a login that never passes the edge, the token check or the audit log. So keep the gateway's key in a file owned by root, outside the account's home, and tell `sshd` to read that file for that account only; the account's own `~/.ssh/authorized_keys` is then not consulted. As root on the target:
 
@@ -108,6 +112,8 @@ The first `grep` must show `/etc/ssh/authorized_keys/%u` and the second the defa
 
 The commands are interpreted by the account's login shell, so give it a shell that runs `sh -c` style command strings.
 
+**Before you enable this target, audit what the account can read and reach.** Being in no privileged group is not enough. Log in as the account and check: its `sudo` rights (`sudo -l`); files that other users can read under other services' configuration and home directories (a world-readable administrator credential of another service, such as a cluster's admin configuration file, makes any local account an administrator of that service); secrets visible in process arguments (`ps -eo args`); unauthenticated services on loopback (`ss -ltn`); and sockets writable by others. Close what you find on the target. The operator guide's [Adding a server](../docs/operator-guide.md#adding-a-server-and-pinning-its-host-key) has the list, and MT-002 re-checks one file on every release.
+
 ## 5. Pin the target's host key
 
 The gateway pins each target's host key in its config and never trusts one on first use. Get the key line from the target itself, over a channel you trust:
@@ -134,7 +140,7 @@ install -m 0640 -o root -g yasshm config.example.yaml /etc/yasshm/config.yaml
 $EDITOR /etc/yasshm/config.yaml
 ```
 
-Replace every value that starts with `REPLACE_`: the AUD tag of your Access application and the team domain (step 8 says where they come from), your email in `principals`, and each server's `host` and `host_key` (a host key placeholder is `ssh-ed25519 REPLACE_...`). The loader refuses a value that still starts with `REPLACE_`, with `replace the placeholder value`. Also set the identity's `user` and `private_key_file`, and each server's `identity`. The comments in the file give each key's meaning, default and range; the operator guide has them as a table. Then check it as the service user, the way the unit does:
+Replace every value that starts with `REPLACE_`: the AUD tag of your Access application and the team domain (step 8 says where they come from), your email in `principals`, and each server's `host` and `host_key` (a host key placeholder is `ssh-ed25519 REPLACE_...`). The loader refuses a value that still starts with `REPLACE_`, with `replace the placeholder value`. Also set the identity's `user` and `private_key_file`, and each server's `identity`. The comments in the file give each key's meaning, default and range; the operator guide has them as a table. Then check it as the service user, the way the unit does (as root the same command fails, because the gateway refuses a private key that is not owned by the user running it; a configuration-management tool's "validate" hook runs as root and has the same problem, which the [operator guide](../docs/operator-guide.md#the-config-file) says how to avoid):
 
 ```sh
 sudo -u yasshm /usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml

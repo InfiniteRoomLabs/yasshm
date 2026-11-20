@@ -59,7 +59,7 @@ This runs the gateway on your own machine, on loopback, with a made-up target, a
 You need `scripts/bootstrap.sh` run once (it installs `mise` and the pinned Go), and `ssh-keygen` for the throwaway keys.
 
 ```sh
-mise run build                       # dist/yasshm_<version>_linux_{amd64,arm64} and dist/SHA256SUMS
+mise run build                       # dist/: yasshm_<version>_linux_{amd64,arm64}, yasshm.service, config.example.yaml, SHA256SUMS
 B=$(ls $PWD/dist/yasshm_*_linux_amd64)   # use the _arm64 file on an arm64 machine
 $B version
 

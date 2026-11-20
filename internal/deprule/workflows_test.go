@@ -299,3 +299,29 @@ func (w workflow) jobEnvTokens() []string {
 	}
 	return bad
 }
+
+// TestWorkflowReleaseAssets: the release carries the unit and the example
+// config beside the binaries and the checksums that cover all four, so an
+// installer does not fetch them from a source tree that may have moved on.
+func TestWorkflowReleaseAssets(t *testing.T) {
+	for _, w := range loadWorkflows(t) {
+		if w.name != "release.yml" {
+			continue
+		}
+		var create string
+		steps, _ := w.jobs()["release"]["steps"].([]any)
+		for _, st := range steps {
+			if run, _ := asMap(st)["run"].(string); strings.Contains(run, "gh release create") {
+				create = run
+			}
+		}
+		if create == "" {
+			t.Fatal("release.yml has no gh release create step")
+		}
+		for _, want := range []string{"dist/yasshm_*_linux_amd64", "dist/yasshm_*_linux_arm64", "dist/yasshm.service", "dist/config.example.yaml", "dist/SHA256SUMS"} {
+			if !strings.Contains(create, want) {
+				t.Errorf("the release does not attach %s", want)
+			}
+		}
+	}
+}

@@ -47,6 +47,8 @@ Read this before pointing it at a machine you care about. These are the spec's o
 
 The config is one YAML file, `/etc/yasshm/config.yaml` in the install steps, read once at start. Change it and restart the service; there is no reload. It is decoded strictly: an unknown key, a duplicate key, a wrong type, a missing required key, a YAML anchor or an alias is an error, and every problem is reported at once as `path.to.key: message (line N)`. Problem paths name list items by index and id, for example `tenants[0](default).servers[0](lab-1).host_key`. `yasshm config check --config <file>` validates the file and the files it names (private keys, `known_hosts` files) without connecting anywhere, and prints `config ok: 1 tenant, 1 server` on success. [deploy/config.example.yaml](../deploy/config.example.yaml) is a complete example with a comment on every key, and a test loads it through the real loader.
 
+**Run `config check` as the service user,** `sudo -u yasshm /usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml`: the gateway refuses a private key that is not owned by the user running it, so the same command as root fails on a correct install with `is owned by uid N, not by the gateway's uid 0`. The unit's `ExecStartPre` runs as the service user for the same reason. **Configuration management** (a role, a module, a template) usually has a "validate with this command" hook for a file it is about to install, and that hook usually runs as root, so it fails for that reason. Do this instead: render the candidate file next to the live one, with the live file's owner and mode (for example `/etc/yasshm/config.yaml.new`, `root:yasshm`, 0640); run `sudo -u yasshm /usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml.new` and let the run fail if it does; and only then rename the candidate over the live file. The check reads the key files the candidate names, so they must already be in place with their final owner and mode. (Verified by running the binary as two different uids in a private temp tree: as the key's owner `config ok: 1 tenant, 1 server`, as root with the same files `is owned by uid 1000, not by the gateway's uid 0`; the owner rule is in `internal/keyfile`.)
+
 A string value that starts with `REPLACE_` is refused with `path: replace the placeholder value`: the example config marks every value you must set that way, so a forgotten edit stops `config check`. File rules: at most 1 MiB, one YAML document, not writable by group or other (the gateway refuses it, because whoever can write it decides what the gateway trusts). Ids (tenant, identity, server, tag) match `^[a-z0-9][a-z0-9-]{0,62}$`. Exactly one tenant is accepted in this version. Four cross-field rules hold for the limits: `default_wait_seconds` is at most `max_wait_seconds`, `default_timeout_seconds` at most `max_timeout_seconds`, `max_concurrent_per_server` at most `max_concurrent_commands`, and `max_output_bytes` at most `max_data_bytes`; and `max_wait_seconds` plus twice `connect_timeout_seconds` must not exceed 120.
 
 The table lists every key the loader accepts. Paths are written from the top of the file; `[]` marks a list item and `NAME` the id that keys a mapping. A test checks that the table holds exactly the keys the decoder accepts and that every limit's default and range equal the limits table in the code.
@@ -100,13 +102,59 @@ The built-in denylist entries have stable rule names, which appear as `rule` in 
 
 ## Adding a server and pinning its host key
 
-A server entry needs three things on the target and three in the config.
+A server entry needs four things on the target and three in the config. If the target is the gateway host itself, read [When a target is the gateway host itself](#when-a-target-is-the-gateway-host-itself) first.
 
 1. On the target, an unprivileged account (the `look` account) and one key line for the gateway's public key that starts with `restrict` and has no forced command (a forced command would stop the gateway from signalling a command, so `kill_command` could not work). The key line goes in a file owned by root, outside the account's home, that the SSH daemon's configuration names for that account (`AuthorizedKeysFile` in a `Match User` block, checked with `sshd -t` before the reload); the account's own `~/.ssh/authorized_keys` is then not consulted. The account must not be able to change which keys log in as it: any command the assistant runs as that account could otherwise add a key or remove `restrict`, opening a login that never passes the edge, the token check or the audit log. [deploy/README.md](../deploy/README.md) has the exact steps, and MT-002 checks that the account cannot write the file.
 2. The target's host key, as one line. Get it from the target itself (the `.pub` file of the host key it serves, read over a channel you trust) or from `ssh-keyscan` and compare its fingerprint with the one the target reports (the scanned line starts with the host name: drop it for `host_key`, or name the scanned file in `known_hosts_file`, and only after the fingerprint matched). Never accept what a first connection shows: a gateway that pins an unknown key can be pointed at an impostor.
 3. The gateway's private key for that account, generated on the gateway host.
 
-In the config: an `identities` entry (the account name and the key file), a `servers` entry that names that identity and carries `host_key` (or a `known_hosts_file`), and `access: look`. Run `yasshm config check`, restart the service, and ask the assistant to call `get_server_info` for the new server: `reachable`, `host_key_ok` and a few facts (kernel, architecture, OS, uptime) come back. A target whose host key is not the pinned one is never spoken to past the handshake: the call fails with `host_key_mismatch` and the mismatch is in the audit log. After a legitimate host key change (a reinstall), replace `host_key` with the new line after checking it, and restart.
+4. Before the server is enabled, audit what the account can read and reach. Being in no privileged group is not enough. Log in as the account (not through the gateway) and look at: its `sudo` rights (`sudo -l` must say it may run nothing); files that other users can read under other services' configuration and home directories (a world-readable administrator credential of another service, such as a cluster's admin configuration file, makes any local account an administrator of that service: `find` for files readable by others under `/etc`, `/var`, `/opt` and `/home` and read the list); secrets visible in process arguments (`ps -eo args` as the account shows every process's command line to it); unauthenticated services listening on loopback (`ss -ltn`); and sockets writable by others (`find / -xdev -type s -perm -o+w`). Fix what it finds on the target (tighten the file, move the secret, close the service) before enabling it: the gateway cannot. MT-002 re-checks one such file on every release.
+
+In the config: an `identities` entry (the account name and the key file), a `servers` entry that names that identity and carries `host_key` (or a `known_hosts_file`), and `access: look`. Run `config check` as the service user (see [The config file](#the-config-file)), restart the service, and ask the assistant to call `get_server_info` for the new server: `reachable`, `host_key_ok` and a few facts (kernel, architecture, OS, uptime) come back. A target whose host key is not the pinned one is never spoken to past the handshake: the call fails with `host_key_mismatch` and the mismatch is in the audit log. After a legitimate host key change (a reinstall), replace `host_key` with the new line after checking it, and restart.
+
+## When a target is the gateway host itself
+
+The deployment assumes the gateway host has no untrusted local users. When the first target is the gateway's own host (the gateway connects to itself over loopback SSH as the unprivileged account), that account is a local user of the gateway host, and hostile text in a command's output can steer what it runs. **Prefer a separate machine or a VM as a target.** If the target must be the gateway host, contain the account. These are deployment measures that you apply and verify; the gateway does not enforce any of them, and a mistake in one is not caught by anything in yasshm.
+
+- **A fixed uid**, chosen when you create the account (`useradd --uid 4001 ...`), so the rest of this list can name it.
+- **A root-owned home it cannot write, and no shell startup files of its own**: `install -d -m 0755 -o root -g root /home/look`, with no `.profile`, `.bashrc`, `.bash_profile` or the like inside. The account does not need a writable home (its key file is elsewhere, see [Adding a server](#adding-a-server-and-pinning-its-host-key), and `/tmp` is there for scratch).
+- **No scheduled jobs**: put the account in `/etc/cron.deny` and `/etc/at.deny` (and keep no `cron.allow` or `at.allow` that lists it).
+- **Its processes end when its session ends, and no lingering**: `loginctl disable-linger look` (`loginctl show-user look -p Linger` must say `Linger=no`), and `KillUserProcesses=yes` in the `[Login]` section of `/etc/systemd/logind.conf` (it applies to every user; `KillExcludeUsers=` exempts the ones that need to stay).
+- **A systemd drop-in for its user slice** that denies binding any port, so the account cannot take the gateway's loopback port while the gateway is down, and denies network traffic beyond loopback. In `/etc/systemd/system/user-4001.slice.d/50-yasshm-look.conf`:
+
+```text
+[Slice]
+SocketBindDeny=any
+IPAddressDeny=any
+IPAddressAllow=localhost
+```
+
+  then `systemctl daemon-reload`. The directive names were checked here by running `systemd-analyze verify` on a slice file (systemd 255 accepts `SocketBindDeny=`, `IPAddressDeny=` and `IPAddressAllow=`, and warns about an unknown name); what they do exactly is in `systemd.resource-control` (the manual page is not installed on the machine this was written on, so read it on the target). `RestrictNetworkInterfaces=lo` is a further directive of that page. The drop-in applies to the account's processes only if its SSH session is placed in its user slice, which needs `pam_systemd` (`UsePAM yes` in the SSH daemon's configuration): the checks below are what tell you whether it did.
+- **In the SSH daemon's `Match User` block for it** (the one that names its key file): no forwarding, no TTY, no user rc file, while SFTP stays available, because `download_file` uses it:
+
+```text
+Match User look
+    AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+    AllowTcpForwarding no
+    AllowStreamLocalForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTunnel no
+    PermitTTY no
+    PermitUserRC no
+    PermitUserEnvironment no
+```
+
+  Do not add a `ForceCommand` or turn off the `sftp` subsystem. `sshd -t` refuses a keyword it does not know; reload the daemon only after it passes.
+
+**Checks to run as the account, by logging in as it, before the gateway is switched on.** Each must come out as stated; repeat them after an operating system upgrade.
+
+1. **It cannot bind a port.** Try to listen on an unused loopback port, for example `python3 -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 18822))"` (or any tool that listens): it must be refused (a permission error), and the same command as an ordinary user must work, so the test can tell.
+2. **It cannot reach a non-loopback address.** Connect to an address on another interface of the host, or to the default gateway, for example `timeout 3 bash -c 'echo > /dev/tcp/<other-address>/22'`: it must fail or time out, and succeed as an ordinary user. A connection to `127.0.0.1` must still work (the gateway reaches the account's `sshd` that way).
+3. **It leaves no process behind.** Start `sleep 600 &`, log out, and as root run `pgrep -u look sleep`: it must print nothing within a few seconds. `loginctl show-user look -p Linger` says `Linger=no`.
+4. **It cannot schedule a job.** `crontab -e` and `echo true | at now` must be refused ("not allowed" or "You do not have permission"), and a `systemd-run --user --on-active=1h true` timer must be refused or gone after the session ends (`systemctl --user list-timers` after a new login shows nothing of it).
+
+A check that fails means the measure is not in force. Do not enable the server until all four pass, and expect that the account can still read whatever the audit in [Adding a server](#adding-a-server-and-pinning-its-host-key) did not close.
 
 ## Connecting a Claude custom connector
 
@@ -161,9 +209,9 @@ A command record has one of seven statuses. `running` is the only one a record l
 
 **Upgrade.**
 
-1. Download the new release files and `SHA256SUMS`, and verify them (`sha256sum --check --ignore-missing SHA256SUMS`). A release carries its version without the `v` of the tag: the tag `v0.1.0` gives `yasshm_0.1.0_linux_amd64` and `yasshm version` prints `yasshm 0.1.0`; a local `mise run build` carries `git describe --tags --always --dirty`.
+1. Download the new release files (the binary for your architecture, `yasshm.service`, `config.example.yaml` and `SHA256SUMS`) and verify them (`sha256sum --check --ignore-missing SHA256SUMS`). A release carries its version without the `v` of the tag: the tag `v0.1.0` gives `yasshm_0.1.0_linux_amd64` and `yasshm version` prints `yasshm 0.1.0`; a local `mise run build` carries `git describe --tags --always --dirty`.
 2. Read the changelog. Back up the data directory if you want the old command records back after a rollback (`systemctl stop yasshm`, copy `/var/lib/yasshm`, keep its modes).
-3. Install the new binary over `/usr/local/bin/yasshm` and run `yasshm config check --config /etc/yasshm/config.yaml` with the new binary.
+3. Install the new binary over `/usr/local/bin/yasshm` and run `sudo -u yasshm /usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml` with it (as the service user: see [The config file](#the-config-file)). Compare the installed unit with the one in the release (`diff /etc/systemd/system/yasshm.service yasshm.service`): if it differs, read the difference, install the release's unit and run `systemctl daemon-reload`. Do the same with `config.example.yaml` to see which keys the new version adds.
 4. `systemctl restart yasshm`. Check `journalctl -u yasshm` for `listening` and `readiness`, `/healthz`, and the `gateway.started` event with the new `version`.
 
 The gateway is down from the stop to the start, and while it is down the loopback port is free for any local user (see [Operational notes](#operational-notes)).
@@ -326,7 +374,7 @@ Each failure but the last row is one `start-up failed` line with a fixed reason,
 
 | Reason | What to check |
 |---|---|
-| `the config is not valid` | The `config problem` lines just above it; run `yasshm config check`. |
+| `the config is not valid` | The `config problem` lines just above it; run `config check` as the service user (`sudo -u yasshm /usr/local/bin/yasshm config check --config /etc/yasshm/config.yaml`; as root it fails on the key's owner). |
 | `the audit log cannot be opened (it must be a regular file owned by this user, mode 0600)` | The file's owner and mode, that it is not a link, and that its directory is not writable by group or other and exists. |
 | `the data directory is in use by another gateway` | Another `yasshm` on the same `data_dir`. Stop it. |
 | `the data directory or database is not private to this user (0700 directory, 0600 files)` | `chmod 700` the directory and check the owner. |
@@ -339,7 +387,7 @@ Each failure but the last row is one `start-up failed` line with a fixed reason,
 | `gateway.started cannot be written to the audit log` | The audit log's disk and permissions. |
 | (the unit's first start) no `start-up failed` line, but the unit fails at once, or an `operation not permitted` error appears after `listening` or while the key set is fetched | The unit has never been started under a real systemd in this project's tests, so look here first. A status of 226/NAMESPACE means a `ReadWritePaths` directory is missing. An `operation not permitted` error means a system call the filter denies (the filter returns an error and does not kill the gateway): comment out the two `SystemCallFilter` lines in the unit, restart to confirm, and report which call it was. DNS or egress to the key-set host shows as `key set fetch failed` with a reason, and `/healthz` reads `degraded`. |
 
-If the service does not even reach `ExecStart`, `ExecStartPre` (`yasshm config check`) failed; its output is in the journal. A unit that fails at once with a namespace error usually has a `ReadWritePaths` directory that does not exist.
+If the service does not even reach `ExecStart`, `ExecStartPre` (`yasshm config check`, run as the service user) failed; its output is in the journal. A unit that fails at once with a namespace error usually has a `ReadWritePaths` directory that does not exist.
 
 ### Other situations
 

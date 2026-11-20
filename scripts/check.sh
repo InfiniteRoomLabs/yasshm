@@ -264,9 +264,34 @@ run_vuln() {
   (cd "$repo_root" && mise exec -- govulncheck ./...)
 }
 
+# The build step also checks what a release is made of: dist/SHA256SUMS lists
+# the unit, the example config and both binaries and verifies, the copies equal
+# the files in deploy/, and a second build of the same commit writes the same
+# SHA256SUMS (the build is reproducible).
 run_build() {
   echo "== build =="
+  local first
   (cd "$repo_root" && mise run build)
+  (cd "$repo_root/dist" && sha256sum --check --quiet SHA256SUMS) || {
+    echo "build: dist/SHA256SUMS does not verify" >&2
+    exit 1
+  }
+  [ "$(wc -l <"$repo_root/dist/SHA256SUMS")" -eq 4 ] || {
+    echo "build: dist/SHA256SUMS must list exactly four files (the unit, the example config, two binaries)" >&2
+    exit 1
+  }
+  cmp -s "$repo_root/dist/yasshm.service" "$repo_root/deploy/yasshm.service" &&
+    cmp -s "$repo_root/dist/config.example.yaml" "$repo_root/deploy/config.example.yaml" || {
+    echo "build: dist holds a unit or example config that differs from deploy/" >&2
+    exit 1
+  }
+  first=$(cat "$repo_root/dist/SHA256SUMS")
+  (cd "$repo_root" && mise run build) >/dev/null
+  [ "$first" = "$(cat "$repo_root/dist/SHA256SUMS")" ] || {
+    echo "build: two builds of one commit wrote different SHA256SUMS (not reproducible)" >&2
+    exit 1
+  }
+  echo "build: dist/SHA256SUMS lists the unit, the example config and both binaries, verifies, and is reproducible"
 }
 
 run_arch() {

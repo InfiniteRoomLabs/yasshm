@@ -84,4 +84,4 @@ jobs:
           if [[ "$TAG" == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "$TAG" dist/yasshm_*_linux_amd64 dist/yasshm_*_linux_arm64 dist/SHA256SUMS "${flags[@]}"
+          gh release create "$TAG" dist/yasshm_*_linux_amd64 dist/yasshm_*_linux_arm64 dist/yasshm.service dist/config.example.yaml dist/SHA256SUMS "${flags[@]}"
