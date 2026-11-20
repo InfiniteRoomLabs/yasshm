@@ -53,7 +53,30 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, `{"level":"ERROR","msg":"second signal: exiting without a graceful shutdown"}`)
 		os.Exit(exitError)
 	})
+	// SIGHUP would end the process by default; a log-rotation hook that
+	// sends it must not kill the gateway. The gateway reopens nothing, so
+	// the signal is ignored with one log line (rotation is by copy and
+	// truncate).
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go ignoreHangups(hup, stop, stderr)
 	return Serve(ctx, args, stdout, stderr)
+}
+
+// hupLine is the log line written for every SIGHUP.
+const hupLine = `{"level":"WARN","msg":"SIGHUP ignored: the gateway reopens no files; rotate the audit log by copy and truncate","version":%q}` + "\n"
+
+// ignoreHangups writes hupLine for each SIGHUP until stop is closed.
+func ignoreHangups(ch <-chan os.Signal, stop <-chan struct{}, stderr io.Writer) {
+	for {
+		select {
+		case <-ch:
+			_, _ = fmt.Fprintf(stderr, hupLine, Version)
+		case <-stop:
+			return
+		}
+	}
 }
 
 // watchSignals cancels on the first signal and calls force on the second,
@@ -157,6 +180,10 @@ func (g *gateway) start(ctx context.Context, path string) error {
 	}
 	g.cfg = cfg
 	g.log.Info("config loaded", "tenants", len(cfg.Tenants), "servers", serverCount(cfg.Tenants))
+	if cfg.Auth.CloudflareAccess.CertsURL != "" {
+		// A test seam: whoever answers at that URL is the issuer.
+		g.log.Warn("certs_url is set: signing keys are fetched from it instead of the team domain")
+	}
 
 	if g.audit, err = audit.Open(cfg.Gateway.AuditLog); err != nil {
 		return startError("the audit log cannot be opened (it must be a regular file owned by this user, mode 0600)")

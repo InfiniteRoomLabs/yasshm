@@ -765,6 +765,28 @@ func TestLoad(t *testing.T) {
 		_, err := Load(t.TempDir())
 		wantProblem(t, err, "config: is not a regular file")
 	})
+	t.Run("raging/a config file group or other can write is refused", func(t *testing.T) {
+		k := genKeys(t)
+		for _, mode := range []os.FileMode{0o620, 0o602, 0o666} {
+			p := writeConfig(t, t.TempDir(), k.base())
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(p)
+			wantProblem(t, err, "config: is writable by group or other")
+		}
+	})
+	t.Run("raging/a known_hosts file group or other can write is refused", func(t *testing.T) {
+		k := genKeys(t)
+		kh := filepath.Join(t.TempDir(), "known_hosts")
+		writeFile(t, kh, []byte("lab-1.example.net "+k.hostKey+"\n"), 0o644)
+		if err := os.Chmod(kh, 0o664); err != nil { //nolint:gosec // G302: the permissive mode is what is under test
+			t.Fatal(err)
+		}
+		text := edit(t, k.base(), "host_key: \""+k.hostKey+"\"", "known_hosts_file: "+kh)
+		_, err := Load(writeConfig(t, t.TempDir(), text))
+		wantProblem(t, err, "tenants[0](default).servers[0](lab-1).known_hosts_file: is writable by group or other")
+	})
 	t.Run("raging/config file larger than MaxFileBytes", func(t *testing.T) {
 		dir := t.TempDir()
 		_, err := Load(writeConfig(t, dir, strings.Repeat("#", MaxFileBytes+1)))

@@ -17,9 +17,7 @@ import (
 func TestE2EEveryTool(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	g, c := f.serve(t)
 	srv := f.target("lab-1")
 
 	t.Run("happy/list_servers", func(t *testing.T) {
@@ -135,34 +133,10 @@ func TestE2EEveryTool(t *testing.T) {
 			}
 		}
 	})
+	// Spec 6 "tokens and key material never appear in logs": the
+	// gateway's cleanup scans its stderr and audit log (scanSecrets), here
+	// and after every other scenario.
 	t.Run("happy/the gateway stops with exit 0", func(t *testing.T) {
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
-	})
-	// Spec 6: tokens and key material never appear in logs, errors or the
-	// audit log. Every token the edge sent starts with the same encoded
-	// JOSE header ("eyJ..."); the key material is the body of the
-	// private key file the gateway read.
-	t.Run("raging/no token or key material in the logs or the audit log", func(t *testing.T) {
-		key, err := os.ReadFile(srv.ClientKeyFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		audit, err := os.ReadFile(f.audit)
-		if err != nil {
-			t.Fatal(err)
-		}
-		header := strings.SplitN(f.is.For(operator).Sign(), ".", 2)[0]
-		for name, text := range map[string]string{"stderr": g.stderr(), "audit log": string(audit)} {
-			if strings.Contains(text, header) || strings.Contains(text, "eyJ") {
-				t.Errorf("the %s holds a token", name)
-			}
-			for _, l := range strings.Split(string(key), "\n") {
-				if len(l) >= 16 && !strings.HasPrefix(l, "-----") && strings.Contains(text, l) {
-					t.Errorf("the %s holds a line of the private key", name)
-				}
-			}
-		}
+		g.stop(t)
 	})
 }

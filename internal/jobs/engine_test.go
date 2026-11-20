@@ -20,6 +20,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/tenanttest"
 )
 
 func TestStatuses(t *testing.T) {
@@ -482,7 +483,7 @@ func TestShutdown(t *testing.T) {
 	})
 	t.Run("corner/past the grace the connections are closed and the record says may still run", func(t *testing.T) {
 		t.Parallel()
-		h := newHarness(t, withServer(sshtest.Options{SilentSignal: true}))
+		h := newHarness(t, withServer(sshtest.Options{SilentSignal: true}), withSSH(tenanttest.ShortSSHOptions(tenant.Limits{})))
 		r := h.start("sleep 30", StartOptions{})
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
@@ -500,7 +501,7 @@ func TestShutdown(t *testing.T) {
 	})
 	t.Run("edge/a second Shutdown waits for the first and honours its context", func(t *testing.T) {
 		t.Parallel()
-		h := newHarness(t, withServer(sshtest.Options{SilentSignal: true}))
+		h := newHarness(t, withServer(sshtest.Options{SilentSignal: true}), withSSH(tenanttest.ShortSSHOptions(tenant.Limits{})))
 		h.start("sleep 30", StartOptions{})
 		first := make(chan error, 1)
 		go func() { first <- h.e.Shutdown(context.Background()) }()

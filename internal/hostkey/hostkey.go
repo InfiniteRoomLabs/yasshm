@@ -120,6 +120,11 @@ func readFile(file string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, &Error{Msg: "is not a regular file"}
 	}
+	// Whoever can write the file can pin an impostor's key; the mode is
+	// read from the open file.
+	if fi.Mode().Perm()&0o022 != 0 {
+		return nil, &Error{Msg: "is writable by group or other"}
+	}
 	b, err := io.ReadAll(io.LimitReader(f, MaxKnownHostsBytes+1))
 	if err != nil {
 		return nil, err

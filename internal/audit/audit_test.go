@@ -128,6 +128,26 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("log = %q", b)
 		}
 	})
+	t.Run("raging/a directory group or other can write is refused", func(t *testing.T) {
+		for _, mode := range []os.FileMode{0o770, 0o757, 0o1777} {
+			dir := filepath.Join(t.TempDir(), "logs")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(dir, mode); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Open(filepath.Join(dir, "audit.jsonl"))
+			if err == nil || !strings.Contains(err.Error(), "is writable by group or other") {
+				t.Fatalf("mode %04o: err = %v", mode, err)
+			}
+		}
+	})
+	t.Run("sad/a missing directory is refused", func(t *testing.T) {
+		if _, err := Open(filepath.Join(t.TempDir(), "absent", "audit.jsonl")); err == nil {
+			t.Fatal("opened a log in a missing directory")
+		}
+	})
 	t.Run("raging/a FIFO at the path is refused without blocking", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "audit.jsonl")
 		if err := syscall.Mkfifo(p, 0o600); err != nil {

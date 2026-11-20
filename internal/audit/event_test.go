@@ -41,8 +41,10 @@ func TestEvents(t *testing.T) {
 			"event": "auth.rejected", "request_id": "r2", "decision": "deny", "reason": "missing_token"}},
 		{"sad/auth.rejected for an unmapped principal", AuthRejected("r3", RejectUnmappedPrincipal, svc), map[string]any{
 			"event": "auth.rejected", "request_id": "r3", "principal": "service:abc.access", "decision": "deny", "reason": "unmapped_principal"}},
-		{"raging/auth.rejected summary of suppressed rejections", AuthRejectionsSuppressed(940), map[string]any{
-			"event": "auth.rejected", "decision": "deny", "reason": "suppressed", "count": float64(940)}},
+		{"raging/auth.rejected summary of suppressed rejections", AuthRejectionsSuppressed(940, SuppressedUnverified), map[string]any{
+			"event": "auth.rejected", "decision": "deny", "reason": "suppressed", "count": float64(940), "stage": "unverified"}},
+		{"raging/auth.rejected summary of suppressed verified-token rejections", AuthRejectionsSuppressed(7, SuppressedVerified), map[string]any{
+			"event": "auth.rejected", "decision": "deny", "reason": "suppressed", "count": float64(7), "stage": "verified"}},
 		{"happy/tool.called", ToolCalled(actor, "run_command", "lab-1", ToolArgs{Command: "uptime", WaitSeconds: i64(5), MergeStderr: yes()}), map[string]any{
 			"event": "tool.called", "request_id": "req-1", "tenant": "default", "principal": "user:operator@example.net", "tool": "run_command", "server": "lab-1",
 			"args": map[string]any{"command": "uptime", "wait_seconds": float64(5), "merge_stderr": true}}},

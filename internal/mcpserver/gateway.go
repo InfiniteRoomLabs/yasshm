@@ -123,6 +123,12 @@ type Gateway struct {
 	shareMu sync.Mutex
 	holding map[string]int
 
+	// transfers counts the probes and file transfers running per server
+	// (of a tenant); each server allows max_concurrent_per_server of them
+	// at once, beside the engine's own count of commands.
+	transferMu sync.Mutex
+	transfers  map[targetKey]int64
+
 	// base ends the probes and file transfers still running when a
 	// shutdown's grace has passed; calls counts the tool calls in flight.
 	base     context.Context
@@ -181,6 +187,7 @@ func New(cfg Config) (*Gateway, error) {
 	g.slots = make(chan struct{}, n)
 	g.share = max(1, n*3/4)
 	g.holding = map[string]int{}
+	g.transfers = map[targetKey]int64{}
 	g.base, g.stopBase = context.WithCancel(context.Background())
 	g.writeTO = WriteTimeoutFor(cfg.Tenants)
 	g.sdk = mcp.NewStreamableHTTPHandler(serverFromContext, &mcp.StreamableHTTPOptions{
@@ -392,6 +399,16 @@ func (g *Gateway) serveMCP(w http.ResponseWriter, r *http.Request) {
 	arrived := time.Now()
 	p, _ := auth.PrincipalFrom(r.Context())
 	rid, _ := auth.RequestIDFrom(r.Context())
+	// The share is taken before the body is read, so one principal cannot
+	// hold every slot of the request cap with bodies sent slowly.
+	key := p.String()
+	if !g.hold(key) {
+		g.overflowed()
+		w.Header().Set("Retry-After", strconv.Itoa(RetryAfterSeconds))
+		writeJSON(w, http.StatusServiceUnavailable, `{"error":"busy"}`)
+		return
+	}
+	defer g.release(key)
 	if r.Method == http.MethodPost {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -404,14 +421,6 @@ func (g *Gateway) serveMCP(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
-	key := p.String()
-	if !g.hold(key) {
-		g.overflowed()
-		w.Header().Set("Retry-After", strconv.Itoa(RetryAfterSeconds))
-		writeJSON(w, http.StatusServiceUnavailable, `{"error":"busy"}`)
-		return
-	}
-	defer g.release(key)
 	s := g.newServer(request{actor: audit.Actor{RequestID: rid, Principal: p}, arrived: arrived, ctx: r.Context()})
 	g.sdk.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), serverKey{}, s)))
 }
@@ -554,4 +563,35 @@ func (g *Gateway) refuse(a audit.Actor, tool string, e *ToolError) *mcp.CallTool
 		return g.auditFailed(a, tool)
 	}
 	return g.fail(a, tool, "", e)
+}
+
+// targetKey names a server of a tenant.
+type targetKey struct {
+	t tenant.TenantID
+	s tenant.ServerID
+}
+
+// errTransferBusy is the answer when a server already runs
+// max_concurrent_per_server probes and file transfers.
+var errTransferBusy = toolErr(CodeBusy, "a limit is reached: max_concurrent_per_server")
+
+// takeTransfer reserves one of the call's server's slots for probes and
+// file transfers (max_concurrent_per_server of them at once, counted apart
+// from commands), or returns errTransferBusy. release frees it.
+func (g *Gateway) takeTransfer(c *call) (release func(), err error) {
+	k := targetKey{c.t.ID, c.srv.ID}
+	g.transferMu.Lock()
+	defer g.transferMu.Unlock()
+	if g.transfers[k] >= c.t.Limits.MaxConcurrentPerServer {
+		return nil, errTransferBusy
+	}
+	g.transfers[k]++
+	return func() {
+		g.transferMu.Lock()
+		defer g.transferMu.Unlock()
+		g.transfers[k]--
+		if g.transfers[k] <= 0 {
+			delete(g.transfers, k)
+		}
+	}, nil
 }

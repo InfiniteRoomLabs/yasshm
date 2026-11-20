@@ -21,9 +21,15 @@ type AuditWriter interface {
 	Write(ev audit.Event) error
 }
 
-// RejectAllowance is how many rejections made before a signature was
-// verified are written to the audit log one by one in a minute; the rest of
-// that minute's are counted and written as one summary event (spec 5.7).
+// RejectAllowance is how many rejections of each class are written to the
+// audit log one by one in a minute; the rest of that minute's are counted
+// and written as one summary event per class (spec 5.7). The classes are
+// rejections of a request whose token has no verified signature (anyone
+// who reaches the listener can cause them) and rejections of a token whose
+// signature verified but that is not valid here (an expired token, one for
+// another application, an unmapped principal: whoever holds such a token
+// could otherwise replay it to write a line per request). Every request is
+// still answered with its status, and auth.accepted is never suppressed.
 const RejectAllowance = 60
 
 // rejectWindow is the length of the allowance's window.
@@ -62,11 +68,23 @@ type Guard struct {
 	log *slog.Logger
 	now func() time.Time
 
-	mu          sync.Mutex // guards the allowance
+	mu          sync.Mutex // guards the allowances
 	windowStart time.Time
-	written     int   // pre-signature rejections written in this window
-	suppressed  int64 // pre-signature rejections not written in this window
+	// written and suppressed count, per class (classUnverified,
+	// classVerified), the rejections written and not written in this
+	// window.
+	written    [2]int
+	suppressed [2]int64
 }
+
+// The rejection classes, each with its own allowance.
+const (
+	classUnverified = iota
+	classVerified
+)
+
+// classStage is the summary event's stage for each class.
+var classStage = [2]string{audit.SuppressedUnverified, audit.SuppressedVerified}
 
 // NewGuard builds a Guard for a and w.
 func NewGuard(a Authenticator, w AuditWriter, opts ...MiddlewareOption) *Guard {
@@ -90,9 +108,10 @@ func Middleware(a Authenticator, w AuditWriter, opts ...MiddlewareOption) func(h
 //   - on a rejection writes auth.rejected (the reason, the request id, and
 //     for an unmapped principal its kind and subject) and answers 401, 403
 //     or 503 (with Retry-After for keys_unavailable) with a fixed JSON body;
-//     the answer is sent even when the audit write fails. A rejection made
-//     before a signature was verified is written only within the allowance
-//     (RejectAllowance a minute) and counted otherwise;
+//     the answer is sent even when the audit write fails. A rejection is
+//     written only within its class's allowance (RejectAllowance a minute
+//     for unverified tokens, the same again for verified ones) and counted
+//     otherwise;
 //   - when the Authenticator returns no error but an incomplete principal
 //     (no tenant, no subject or no valid kind), writes auth.rejected
 //     (invalid_token) and answers 500;
@@ -121,7 +140,7 @@ func (g *Guard) serve(next http.Handler, rw http.ResponseWriter, r *http.Request
 		if errors.As(err, &ae) {
 			reason, who = ae.reason, ae.who
 		}
-		if !reason.preSignature() || g.allow() {
+		if c, limited := reason.class(); !limited || g.allow(c) {
 			g.rejected(id, reason, who)
 		}
 		respond(rw, reason.Status(), reason == ReasonKeysUnavailable)
@@ -144,16 +163,16 @@ func (g *Guard) rejected(id string, reason Reason, who tenant.Principal) {
 	}
 }
 
-// allow reports whether one more pre-signature rejection may be written in
+// allow reports whether one more rejection of class c may be written in
 // the current window, and counts it as suppressed if not.
-func (g *Guard) allow() bool {
+func (g *Guard) allow(c int) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.written < RejectAllowance {
-		g.written++
+	if g.written[c] < RejectAllowance {
+		g.written[c]++
 		return true
 	}
-	g.suppressed++
+	g.suppressed[c]++
 	return false
 }
 
@@ -167,20 +186,21 @@ func (g *Guard) rollover() {
 		return
 	}
 	g.flushLocked()
-	g.windowStart, g.written = now, 0
+	g.windowStart, g.written = now, [2]int{}
 }
 
-// flushLocked writes the summary event if anything was suppressed. g.mu
-// must be held, so the summary is written once and before the next window's
-// events.
+// flushLocked writes a summary event for each class that had rejections
+// suppressed. g.mu must be held, so each summary is written once and before
+// the next window's events.
 func (g *Guard) flushLocked() {
-	if g.suppressed == 0 {
-		return
-	}
-	n := g.suppressed
-	g.suppressed = 0
-	if werr := g.w.Write(audit.AuthRejectionsSuppressed(n)); werr != nil {
-		g.log.Error("auth: audit write failed for the suppressed-rejections summary", "count", n, "error", werr.Error())
+	for c, n := range g.suppressed {
+		if n == 0 {
+			continue
+		}
+		g.suppressed[c] = 0
+		if werr := g.w.Write(audit.AuthRejectionsSuppressed(n, classStage[c])); werr != nil {
+			g.log.Error("auth: audit write failed for the suppressed-rejections summary", "count", n, "stage", classStage[c], "error", werr.Error())
+		}
 	}
 }
 
@@ -192,14 +212,21 @@ func (g *Guard) Close() {
 	g.flushLocked()
 }
 
-// preSignature reports whether a rejection with this reason is made before
-// a signature was verified, so anyone who reaches the listener can cause it.
-func (r Reason) preSignature() bool {
+// class returns the allowance a rejection with this reason counts against,
+// and whether it is limited at all. Rejections made before a signature was
+// verified (a failed signature included: anyone can send a token that names
+// a published kid) are classUnverified; rejections of a token whose
+// signature verified are classVerified. invalid_token (an authenticator
+// error of no known reason, or an incomplete principal) is a server-side
+// fault, not something a caller can repeat at will, and is always written.
+func (r Reason) class() (c int, limited bool) {
 	switch r {
-	case ReasonMissingToken, ReasonMalformedToken, ReasonOversizedToken, ReasonBadAlgorithm, ReasonUnknownKey, ReasonKeysUnavailable:
-		return true
+	case ReasonMissingToken, ReasonMalformedToken, ReasonOversizedToken, ReasonBadAlgorithm, ReasonUnknownKey, ReasonKeysUnavailable, ReasonBadSignature:
+		return classUnverified, true
+	case ReasonWrongIssuer, ReasonWrongAudience, ReasonExpired, ReasonNotYetValid, ReasonIssuedInFuture, ReasonMissingClaim, ReasonAmbiguousIdentity, ReasonUnmappedPrincipal:
+		return classVerified, true
 	default:
-		return false
+		return 0, false
 	}
 }
 

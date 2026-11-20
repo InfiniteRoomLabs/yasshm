@@ -434,10 +434,11 @@ func (g *gateway) waitLog(d time.Duration, match func(map[string]any) bool) (map
 	}
 }
 
-// signal sends sig to the gateway process.
+// signal sends sig to the gateway process (through os.Process, which
+// refuses once the child has been reaped, so a reused pid is never hit).
 func (g *gateway) signal(sig syscall.Signal) {
 	g.t.Helper()
-	if err := syscall.Kill(g.pid, sig); err != nil {
+	if err := g.cmd.Process.Signal(sig); err != nil {
 		g.t.Fatalf("signal %v: %v", sig, err)
 	}
 }
@@ -454,20 +455,23 @@ func (g *gateway) wait(d time.Duration) (int, bool) {
 	}
 }
 
-// stop sends SIGTERM and waits for the exit; it returns the exit code and
-// fails the test if the child does not exit within stopBound.
-func (g *gateway) stop() int {
-	g.t.Helper()
+// stop sends SIGTERM, waits for the exit and fails t unless the child
+// exits 0 within stopBound.
+func (g *gateway) stop(t *testing.T) {
+	t.Helper()
 	g.signal(syscall.SIGTERM)
 	code, ok := g.wait(stopBound)
 	if !ok {
 		g.killGroup()
-		g.t.Fatalf("the gateway did not exit within %v of SIGTERM:\n%s", stopBound, g.stderr())
+		t.Fatalf("the gateway did not exit within %v of SIGTERM:\n%s", stopBound, g.stderr())
 	}
-	return code
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
 }
 
-// killGroup kills the child's process group and reaps it.
+// killGroup kills the child's process group and reaps it. It is called
+// only while the child has not been reaped, so the group is its own.
 func (g *gateway) killGroup() {
 	_ = syscall.Kill(-g.pid, syscall.SIGKILL)
 	<-g.exited
@@ -475,24 +479,72 @@ func (g *gateway) killGroup() {
 
 // cleanup stops a child the scenario left running (SIGTERM within
 // stopBound, else a failure and SIGKILL), checks that no process of its
-// group is left, and attaches its stderr to the log of a failed test.
+// group is left, scans what it wrote for tokens and key material, and
+// attaches its stderr to the log of a failed test.
 func (g *gateway) cleanup() {
 	select {
 	case <-g.exited:
 	default:
-		_ = syscall.Kill(g.pid, syscall.SIGTERM)
+		_ = g.cmd.Process.Signal(syscall.SIGTERM)
 		if _, ok := g.wait(stopBound); !ok {
 			g.killGroup()
 			g.t.Errorf("the gateway did not exit within %v of SIGTERM at cleanup", stopBound)
 		}
 	}
+	// The gateway starts no processes, so its group must be empty now.
+	// Reported, not killed: the leader has been reaped, so the id is no
+	// longer certainly this test's.
 	if err := syscall.Kill(-g.pid, 0); !errors.Is(err, syscall.ESRCH) {
-		_ = syscall.Kill(-g.pid, syscall.SIGKILL)
 		g.t.Errorf("a process of the gateway's group was still alive after it exited (kill -0: %v)", err)
 	}
+	g.scanSecrets()
 	if g.t.Failed() {
 		g.t.Logf("gateway stderr:\n%s", g.stderr())
 	}
+}
+
+// scanSecrets is spec 6's "tokens and key material never appear in logs or
+// the audit log", checked after every scenario: neither the child's stderr
+// nor the audit log holds "eyJ" (how every encoded JOSE header and claim
+// set starts, so any token the edge sent) or a line of a private key the
+// gateway read.
+func (g *gateway) scanSecrets() {
+	texts := map[string]string{"stderr": g.stderr()}
+	if b, err := os.ReadFile(g.f.audit); err == nil {
+		texts["audit log"] = string(b)
+	}
+	var keyLines []string
+	for _, tg := range g.f.targets {
+		b, err := os.ReadFile(tg.srv.ClientKeyFile)
+		if err != nil {
+			g.t.Errorf("reading a client key: %v", err)
+			continue
+		}
+		for _, l := range strings.Split(string(b), "\n") {
+			if len(l) >= 16 && !strings.HasPrefix(l, "-----") {
+				keyLines = append(keyLines, l)
+			}
+		}
+	}
+	for name, text := range texts {
+		if strings.Contains(text, "eyJ") {
+			g.t.Errorf("the gateway's %s holds a token", name)
+		}
+		for _, l := range keyLines {
+			if strings.Contains(text, l) {
+				g.t.Errorf("the gateway's %s holds a line of a private key", name)
+			}
+		}
+	}
+}
+
+// serve starts the gateway, waits until it is ready and connects an MCP
+// client through a new edge.
+func (f *fixture) serve(t *testing.T) (*gateway, *client) {
+	t.Helper()
+	g := f.start(t)
+	g.waitReady(t)
+	return g, connect(t, g.edge(t))
 }
 
 // healthz GETs /healthz from the gateway itself and returns the status and
@@ -850,6 +902,15 @@ func (f *fixture) auditLog(t *testing.T) (lines []auditLine, rest string) {
 		lines = append(lines, a)
 	}
 	return lines, rest
+}
+
+// finished reports whether the audit log holds command.finished for
+// command id with status.
+func (f *fixture) finished(t *testing.T, id, status string) bool {
+	t.Helper()
+	return len(f.events(t, func(l auditLine) bool {
+		return l.Event == "command.finished" && l.CommandID == id && l.Status == status
+	})) > 0
 }
 
 // events returns the names of the audit events that match.

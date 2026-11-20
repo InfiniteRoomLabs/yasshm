@@ -449,3 +449,23 @@ func TestWatchSignals(t *testing.T) {
 	})
 	close(stop)
 }
+
+func TestIgnoreHangups(t *testing.T) {
+	ch := make(chan os.Signal, 1)
+	stop := make(chan struct{})
+	out := &syncbuf.Buffer{}
+	done := make(chan struct{})
+	go func() { defer close(done); ignoreHangups(ch, stop, out) }()
+	ch <- syscall.SIGHUP
+	t.Run("happy/one log line per SIGHUP", func(t *testing.T) {
+		if !leakcheck.Poll(5*time.Second, func() bool { return strings.Contains(out.String(), `"msg":"SIGHUP ignored`) }) {
+			t.Fatalf("log = %q", out.String())
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &m); err != nil || m["level"] != "WARN" || m["version"] != Version {
+			t.Fatalf("line %q: %v", out.String(), err)
+		}
+	})
+	close(stop)
+	<-done
+}

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"regexp/syntax"
 	"strings"
 	"testing"
 )
@@ -215,6 +216,229 @@ func TestCommandRuleNeeds(t *testing.T) {
 	t.Run("edge/an operator rule always runs", func(t *testing.T) {
 		if !(commandRule{Name: "deny_commands[0]"}).mayMatch("") {
 			t.Fatal("a rule without literals was skipped")
+		}
+	})
+}
+
+// finiteLimit bounds the strings finite enumerates.
+const finiteLimit = 512
+
+// finite returns every string re can match when that is a small finite
+// set (literals, small character classes, optional pieces, alternations
+// and concatenations of those), and false otherwise.
+func finite(re *syntax.Regexp) ([]string, bool) {
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return []string{""}, true
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			return nil, false
+		}
+		return []string{string(re.Rune)}, true
+	case syntax.OpCharClass:
+		var out []string
+		for i := 0; i+1 < len(re.Rune); i += 2 {
+			for r := re.Rune[i]; r <= re.Rune[i+1]; r++ {
+				if len(out) >= 8 {
+					return nil, false
+				}
+				out = append(out, string(r))
+			}
+		}
+		return out, true
+	case syntax.OpCapture:
+		return finite(re.Sub[0])
+	case syntax.OpQuest:
+		s, ok := finite(re.Sub[0])
+		return append([]string{""}, s...), ok
+	case syntax.OpAlternate:
+		var out []string
+		for _, sub := range re.Sub {
+			s, ok := finite(sub)
+			if !ok || len(out)+len(s) > finiteLimit {
+				return nil, false
+			}
+			out = append(out, s...)
+		}
+		return out, true
+	case syntax.OpConcat:
+		return finiteConcat(re.Sub)
+	default:
+		return nil, false
+	}
+}
+
+// finiteConcat is finite for the concatenation of subs.
+func finiteConcat(subs []*syntax.Regexp) ([]string, bool) {
+	out := []string{""}
+	for _, sub := range subs {
+		s, ok := finite(sub)
+		if !ok || len(out)*len(s) > finiteLimit {
+			return nil, false
+		}
+		next := make([]string, 0, len(out)*len(s))
+		for _, a := range out {
+			for _, b := range s {
+				next = append(next, a+b)
+			}
+		}
+		out = next
+	}
+	return out, true
+}
+
+// heads returns strings of which every match of re starts with one: the
+// finite strings of a finite piece, the strings of a concatenation's
+// finite leading run followed by the heads of its first other piece, the
+// union over an alternation's arms, and "" when nothing is known.
+func heads(re *syntax.Regexp) []string {
+	if s, ok := finite(re); ok {
+		return s
+	}
+	switch re.Op {
+	case syntax.OpCapture, syntax.OpPlus:
+		return heads(re.Sub[0])
+	case syntax.OpRepeat:
+		if re.Min >= 1 {
+			return heads(re.Sub[0])
+		}
+	case syntax.OpAlternate:
+		var out []string
+		for _, sub := range re.Sub {
+			out = append(out, heads(sub)...)
+		}
+		if len(out) <= finiteLimit {
+			return out
+		}
+	case syntax.OpConcat:
+		for i, sub := range re.Sub {
+			if _, ok := finite(sub); ok {
+				continue
+			}
+			lead, ok := finiteConcat(re.Sub[:i])
+			if !ok {
+				break
+			}
+			return cross(lead, heads(sub))
+		}
+	}
+	return []string{""}
+}
+
+// cross is every a+b, or {""} past finiteLimit.
+func cross(as, bs []string) []string {
+	if len(as)*len(bs) > finiteLimit {
+		return []string{""}
+	}
+	out := make([]string, 0, len(as)*len(bs))
+	for _, a := range as {
+		for _, b := range bs {
+			out = append(out, a+b)
+		}
+	}
+	return out
+}
+
+// containsNeed reports whether every string of ss contains one of needs.
+func containsNeed(ss, needs []string) bool {
+	for _, s := range ss {
+		hit := false
+		for _, n := range needs {
+			hit = hit || strings.Contains(s, n)
+		}
+		if !hit {
+			return false
+		}
+	}
+	return true
+}
+
+// requires reports whether every string re matches contains one of needs,
+// computed from the expression's structure: a finite piece whose strings
+// each contain a need; a concatenation with such a run of consecutive
+// finite pieces or such a child; an alternation whose arms all qualify; a
+// group or a repetition of at least one. A run is extended by the heads of
+// the piece after it, so a prefix the parser factored out of an
+// alternation (mk + fs|e2fs|...) is put back. A star or an optional piece
+// requires nothing.
+func requires(re *syntax.Regexp, needs []string) bool {
+	if s, ok := finite(re); ok {
+		return containsNeed(s, needs)
+	}
+	switch re.Op {
+	case syntax.OpCapture, syntax.OpPlus:
+		return requires(re.Sub[0], needs)
+	case syntax.OpRepeat:
+		return re.Min >= 1 && requires(re.Sub[0], needs)
+	case syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			if !requires(sub, needs) {
+				return false
+			}
+		}
+		return true
+	case syntax.OpConcat:
+		for i := range re.Sub {
+			if requires(re.Sub[i], needs) {
+				return true
+			}
+			// A run of finite pieces, then the heads of the next piece:
+			// each string is a substring of every match of the run.
+			for j := i; j <= len(re.Sub); j++ {
+				s, ok := finiteConcat(re.Sub[i:j])
+				if !ok {
+					break
+				}
+				if j < len(re.Sub) {
+					s = cross(s, heads(re.Sub[j]))
+				}
+				if containsNeed(s, needs) {
+					return true
+				}
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// TestNeedsAreRequired: each built-in rule's Needs is derived again from
+// the pattern's structure (regexp/syntax), so an alternative added to a
+// rule without a matching Needs entry fails here even when no case covers
+// it.
+func TestNeedsAreRequired(t *testing.T) {
+	for _, b := range builtinCommands {
+		t.Run("happy/"+b.Name, func(t *testing.T) {
+			re, err := syntax.Parse(b.Pattern, syntax.Perl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !requires(re.Simplify(), b.Needs) {
+				t.Fatalf("a match of %s need not contain any of %q", b.Name, b.Needs)
+			}
+		})
+	}
+	t.Run("sad/an alternative without a literal is caught", func(t *testing.T) {
+		for _, p := range []string{`shutdown|reboot|kexec`, `(?:sudo)*x`, `x?sudo|doas`, `(?i)sudo`, `mk(?:fs|e2fs)|wipefs`} {
+			re, err := syntax.Parse(p, syntax.Perl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requires(re.Simplify(), []string{"shutdown", "reboot", "sudo"}) {
+				t.Errorf("%q passed", p)
+			}
+		}
+	})
+	t.Run("happy/factored alternations and concatenated literals are understood", func(t *testing.T) {
+		for _, p := range []string{`mkfs(?:\.\w+)?|mke2fs|mkswap`, `\b(?:tel)?init\s`, `x(?:a|b)y(?:sudo|sudoedit)`, `[a-z]+\(\)\s*\{`} {
+			re, err := syntax.Parse(p, syntax.Perl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !requires(re.Simplify(), []string{"mkfs", "mke2fs", "mkswap", "init", "sudo", "()"}) {
+				t.Errorf("%q failed", p)
+			}
 		}
 	})
 }

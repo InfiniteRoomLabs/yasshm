@@ -211,6 +211,11 @@ func readFile(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, errors.New("is not a regular file")
 	}
+	// Whoever can write the config decides what the gateway trusts; the
+	// mode is read from the open file, so the check holds for root too.
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return nil, fmt.Errorf("is writable by group or other (mode %04o); it must not be", perm)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the file: %w", err)

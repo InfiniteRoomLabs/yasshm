@@ -16,9 +16,7 @@ import (
 func TestE2ELongCommand(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 
 	script := `i=0; while [ $i -lt 300 ]; do echo "line-$i"; i=$((i+1)); done; echo ready; sleep 300`
 	var want strings.Builder
@@ -94,21 +92,15 @@ func TestE2ELongCommand(t *testing.T) {
 func TestE2ETimeout(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 	t.Run("sad/a command past its timeout is timed_out", func(t *testing.T) {
 		r := c.runCommand(t, "lab-1", "echo begun; sleep 300", map[string]any{"timeout_seconds": 1, "wait_seconds": 15})
 		if r.Status != "timed_out" || r.Stdout != "begun\n" {
 			t.Fatalf("run = %+v", r)
 		}
-		lines, _ := f.auditLog(t)
-		for _, l := range lines {
-			if l.Event == "command.finished" && l.CommandID == r.CommandID && l.Status == "timed_out" {
-				return
-			}
+		if !f.finished(t, r.CommandID, "timed_out") {
+			t.Fatal("no command.finished with status timed_out")
 		}
-		t.Fatal("no command.finished with status timed_out")
 	})
 }
 
@@ -118,19 +110,24 @@ func TestE2ETimeout(t *testing.T) {
 func TestE2EOutputLimit(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, withLimits(map[string]int64{"max_output_bytes": 1024}))
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 	t.Run("edge/output past max_output_bytes is truncated", func(t *testing.T) {
 		r := c.runCommand(t, "lab-1", `head -c 500000 /dev/zero | tr '\0' a; echo; echo finished >&2`, map[string]any{"wait_seconds": 20, "merge_stderr": false})
-		// stdout_bytes counts what the command wrote; the gateway keeps
-		// the first max_output_bytes of it.
-		if r.Status != "succeeded" || !r.Truncated || r.StdoutBytes != 500001 || r.Stdout != strings.Repeat("a", 1024) {
-			t.Fatalf("run = status %s truncated %v stdout_bytes %d stdout %d bytes", r.Status, r.Truncated, r.StdoutBytes, len(r.Stdout))
+		// max_output_bytes is one allowance for both streams, taken in
+		// arrival order (spec 5.6), so the 9 stderr bytes may or may not
+		// come before stdout fills it: what is promised is the total kept,
+		// the truncated flag, the exact counts of what the command wrote,
+		// and a command that was not blocked (it succeeded on its own).
+		if r.Status != "succeeded" || !r.Truncated || r.StdoutBytes != 500001 || r.StderrBytes != 9 {
+			t.Fatalf("run = status %s truncated %v stdout_bytes %d stderr_bytes %d", r.Status, r.Truncated, r.StdoutBytes, r.StderrBytes)
+		}
+		if len(r.Stdout)+len(r.Stderr) != 1024 || strings.Trim(r.Stdout, "a") != "" || (r.Stderr != "" && r.Stderr != "finished\n") {
+			t.Fatalf("kept stdout %d bytes, stderr %q", len(r.Stdout), r.Stderr)
 		}
 		o := c.readOutput(t, r.CommandID, map[string]any{"offset": -4})
-		if !o.Truncated || o.Size != 1024 || o.Data != "aaaa" {
-			t.Fatalf("read = %+v", o)
+		e := c.readOutput(t, r.CommandID, map[string]any{"stream": "stderr"})
+		if !o.Truncated || o.Size+e.Size != 1024 || o.Size != int64(len(r.Stdout)) || o.Data != "aaaa" || e.Data != r.Stderr {
+			t.Fatalf("read = %+v, stderr %+v", o, e)
 		}
 	})
 }
@@ -140,9 +137,7 @@ func TestE2EOutputLimit(t *testing.T) {
 func TestE2EBusy(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, withLimits(map[string]int64{"max_concurrent_per_server": 1, "max_concurrent_commands": 2}))
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 	t.Run("sad/a second command on a busy server", func(t *testing.T) {
 		first := c.runCommand(t, "lab-1", "sleep 300", map[string]any{"wait_seconds": 0})
 		if first.Status != "running" {
@@ -171,9 +166,7 @@ func TestE2EBusy(t *testing.T) {
 func TestE2EPolicyDenied(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, withDenyCommands(`\bforbidden-tool\b`))
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 	srv := f.target("lab-1")
 	reqs, conns := sshRequests(srv)
 	for _, tc := range []struct {
@@ -191,12 +184,9 @@ func TestE2EPolicyDenied(t *testing.T) {
 			if e.Code != "policy_denied" || e.Rule == "" || (tc.rule != "" && e.Rule != tc.rule) {
 				t.Fatalf("error = %+v", e)
 			}
-			found := false
-			lines, _ := f.auditLog(t)
-			for _, l := range lines {
-				found = found || (l.Event == "policy.denied" && l.Rule == e.Rule && l.Tool == tc.tool && l.Code == "policy_denied")
-			}
-			if !found {
+			if len(f.events(t, func(l auditLine) bool {
+				return l.Event == "policy.denied" && l.Rule == e.Rule && l.Tool == tc.tool && l.Code == "policy_denied"
+			})) == 0 {
 				t.Fatalf("no policy.denied event for %s", e.Rule)
 			}
 		})
@@ -214,9 +204,7 @@ func TestE2EPolicyDenied(t *testing.T) {
 func TestE2EHostKeyMismatch(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, withTarget("impostor", sshtest.Options{WrongHostKey: true}))
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 	srv := f.target("impostor")
 	t.Run("sad/run_command is host_key_mismatch", func(t *testing.T) {
 		e := c.fail(t, "run_command", map[string]any{"server": "impostor", "command": "id"})
@@ -250,9 +238,7 @@ func TestE2EHostKeyMismatch(t *testing.T) {
 func TestE2EUploadDenied(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	_, c := f.serve(t)
 	srv := f.target("lab-1")
 	for _, tc := range []struct {
 		name string

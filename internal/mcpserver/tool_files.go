@@ -101,6 +101,11 @@ func (g *Gateway) bounded(ctx context.Context, d time.Duration) (context.Context
 // download writes file.downloaded (requested) before the read, refusing if
 // it cannot, reads at most n bytes and writes the done form after.
 func (g *Gateway) download(ctx context.Context, c *call, path string, off, n int64) (result, error) {
+	release, terr := g.takeTransfer(c)
+	if terr != nil {
+		return result{}, terr
+	}
+	defer release()
 	if err := g.audit.Write(audit.FileDownloadRequested(c.actor, c.srv.ID, path, off, n)); err != nil {
 		return result{}, errAudit
 	}
@@ -198,6 +203,11 @@ func prepareUpload(_ context.Context, g *Gateway, c *call, raw json.RawMessage) 
 // upload writes file.uploaded (requested) before the write, refusing if it
 // cannot, writes the file and writes the done form after.
 func (g *Gateway) upload(ctx context.Context, c *call, path string, data []byte, modeText string, mode fs.FileMode, overwrite bool) (result, error) {
+	release, terr := g.takeTransfer(c)
+	if terr != nil {
+		return result{}, terr
+	}
+	defer release()
 	if err := g.audit.Write(audit.FileUploadRequested(c.actor, c.srv.ID, path, int64(len(data)), modeText, overwrite)); err != nil {
 		return result{}, errAudit
 	}

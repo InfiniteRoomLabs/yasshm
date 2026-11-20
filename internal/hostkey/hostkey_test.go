@@ -269,6 +269,18 @@ func TestKnownHosts(t *testing.T) {
 			t.Fatalf("msg = %q", m)
 		}
 	})
+	t.Run("raging/a file group or other can write", func(t *testing.T) {
+		p := writeKH(t, host+" "+strings.TrimSpace(string(ssh.MarshalAuthorizedKey(probeKey)))+"\n")
+		for _, mode := range []os.FileMode{0o620, 0o602} {
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+			_, err := KnownHosts(p, host, 22)
+			if m := msgOf(t, err); m != "is writable by group or other" {
+				t.Fatalf("mode %04o: msg = %q", mode, m)
+			}
+		}
+	})
 	t.Run("raging/too large", func(t *testing.T) {
 		_, err := KnownHosts(writeKH(t, strings.Repeat("#", MaxKnownHostsBytes+1)), host, 22)
 		if m := msgOf(t, err); m != "is larger than 1 MiB" {

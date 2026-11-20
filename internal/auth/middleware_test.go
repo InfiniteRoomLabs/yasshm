@@ -172,63 +172,103 @@ func TestRejectionAllowance(t *testing.T) {
 			t.Fatalf("status %d, want %d", rec.Code, want)
 		}
 	}
-	count := func(events []map[string]any, reason string) (n int) {
+	count := func(events []map[string]any, key, val string) (n int) {
 		for _, e := range events {
-			if e["reason"] == reason {
+			if e[key] == val {
 				n++
 			}
 		}
 		return n
 	}
-	t.Run("raging/1000 pre-signature rejections in a minute write 60 events", func(t *testing.T) {
-		for i := range 1000 {
-			if i%2 == 0 {
-				send(t, request(""), http.StatusUnauthorized)
-			} else {
-				send(t, request("not-a-token"), http.StatusUnauthorized)
-			}
+	// A forged token uses public data only: the served kid, a signature
+	// made with a key the issuer never served.
+	forged := f.is.User(userEmail).SignWith(accesstest.RSAKey(2)).Sign()
+	expired := f.is.User(userEmail).Times(f.clk.Now(), -7200, -7200, -3600).Sign()
+	t.Run("raging/2000 forged signatures in a minute write 60 events", func(t *testing.T) {
+		for range 2000 {
+			send(t, request(forged), http.StatusUnauthorized)
 		}
 		ev := readAudit(t, path)
-		if len(ev) != RejectAllowance || count(ev, "suppressed") != 0 {
+		if len(ev) != RejectAllowance || count(ev, "reason", "bad_signature") != RejectAllowance {
 			t.Fatalf("%d events", len(ev))
 		}
 	})
-	t.Run("raging/verified-token rejections are never suppressed", func(t *testing.T) {
+	t.Run("raging/other unverified rejections share that allowance", func(t *testing.T) {
+		send(t, request(""), http.StatusUnauthorized)
+		send(t, request("not-a-token"), http.StatusUnauthorized)
+		send(t, request(accesstest.TamperSignature(f.is.User(userEmail).Sign())), http.StatusUnauthorized)
+		if n := len(readAudit(t, path)); n != RejectAllowance {
+			t.Fatalf("%d events", n)
+		}
+	})
+	t.Run("raging/a replayed expired token has its own allowance of 60", func(t *testing.T) {
+		for range 2000 {
+			send(t, request(expired), http.StatusUnauthorized)
+		}
+		ev := readAudit(t, path)
+		if len(ev) != 2*RejectAllowance || count(ev, "reason", "expired") != RejectAllowance {
+			t.Fatalf("%d events", len(ev))
+		}
+		// The verified class is full too: other verified rejections are
+		// counted, not written.
 		send(t, request(f.is.User(otherEmail).Sign()), http.StatusForbidden)
 		send(t, request(f.is.User(userEmail).Claim("aud", "x").Sign()), http.StatusUnauthorized)
-		send(t, request(accesstest.TamperSignature(f.is.User(userEmail).Sign())), http.StatusUnauthorized)
-		send(t, request(f.is.User(userEmail).Sign()), http.StatusOK)
+		if n := len(readAudit(t, path)); n != 2*RejectAllowance {
+			t.Fatalf("%d events", n)
+		}
+	})
+	t.Run("happy/auth.accepted is never suppressed", func(t *testing.T) {
+		for range 3 {
+			send(t, request(f.is.User(userEmail).Sign()), http.StatusOK)
+		}
 		ev := readAudit(t, path)
-		if len(ev) != RejectAllowance+4 || count(ev, "unmapped_principal") != 1 || count(ev, "wrong_audience") != 1 || count(ev, "bad_signature") != 1 {
+		if len(ev) != 2*RejectAllowance+3 || count(ev, "event", "auth.accepted") != 3 {
 			t.Fatalf("%d events", len(ev))
 		}
 	})
-	t.Run("raging/the next minute writes one summary of 940 and starts fresh", func(t *testing.T) {
+	t.Run("raging/the next minute writes one summary per class and starts fresh", func(t *testing.T) {
 		f.clk.Add(time.Minute)
 		send(t, request(""), http.StatusUnauthorized)
 		ev := readAudit(t, path)
-		if len(ev) != RejectAllowance+6 {
+		if len(ev) != 2*RejectAllowance+6 {
 			t.Fatalf("%d events", len(ev))
 		}
-		sum := ev[RejectAllowance+4]
-		if sum["reason"] != "suppressed" || sum["count"] != float64(940) || sum["event"] != "auth.rejected" || ev[RejectAllowance+5]["reason"] != "missing_token" {
-			t.Fatalf("summary %v, then %v", sum, ev[RejectAllowance+5])
+		un, ve := ev[2*RejectAllowance+3], ev[2*RejectAllowance+4]
+		if un["reason"] != "suppressed" || un["stage"] != "unverified" || un["count"] != float64(1943) || un["event"] != "auth.rejected" {
+			t.Fatalf("unverified summary %v", un)
+		}
+		if ve["reason"] != "suppressed" || ve["stage"] != "verified" || ve["count"] != float64(1942) {
+			t.Fatalf("verified summary %v", ve)
+		}
+		if ev[2*RejectAllowance+5]["reason"] != "missing_token" {
+			t.Fatalf("then %v", ev[2*RejectAllowance+5])
 		}
 		for range RejectAllowance - 1 {
 			send(t, request(""), http.StatusUnauthorized)
 		}
-		if n := len(readAudit(t, path)); n != 2*RejectAllowance+5 {
+		if n := len(readAudit(t, path)); n != 3*RejectAllowance+5 {
 			t.Fatalf("%d events: the new window did not allow %d", n, RejectAllowance)
+		}
+	})
+	t.Run("edge/the two allowances are independent", func(t *testing.T) {
+		// The unverified class is full in this window; verified
+		// rejections are still written.
+		before := len(readAudit(t, path))
+		send(t, request(""), http.StatusUnauthorized)
+		send(t, request(expired), http.StatusUnauthorized)
+		send(t, request(f.is.User(otherEmail).Sign()), http.StatusForbidden)
+		ev := readAudit(t, path)
+		if len(ev) != before+2 || ev[before]["reason"] != "expired" || ev[before+1]["reason"] != "unmapped_principal" {
+			t.Fatalf("events %v", ev[before:])
 		}
 	})
 	t.Run("raging/Close writes a pending summary once", func(t *testing.T) {
 		before := len(readAudit(t, path))
 		send(t, request(""), http.StatusUnauthorized)
-		send(t, request(""), http.StatusUnauthorized)
 		g.Close()
 		g.Close()
 		ev := readAudit(t, path)
-		if len(ev) != before+1 || ev[before]["reason"] != "suppressed" || ev[before]["count"] != float64(2) {
+		if len(ev) != before+1 || ev[before]["reason"] != "suppressed" || ev[before]["stage"] != "unverified" || ev[before]["count"] != float64(2) {
 			t.Fatalf("events after Close: %v", ev[before:])
 		}
 	})
@@ -243,13 +283,24 @@ func TestRejectionAllowance(t *testing.T) {
 			t.Fatalf("log = %s", logs.String())
 		}
 	})
-	t.Run("happy/the pre-signature set", func(t *testing.T) {
-		pre := map[Reason]bool{ReasonMissingToken: true, ReasonMalformedToken: true, ReasonOversizedToken: true, ReasonBadAlgorithm: true, ReasonUnknownKey: true, ReasonKeysUnavailable: true}
+	t.Run("happy/the classes", func(t *testing.T) {
+		unverified := map[Reason]bool{ReasonMissingToken: true, ReasonMalformedToken: true, ReasonOversizedToken: true, ReasonBadAlgorithm: true, ReasonUnknownKey: true, ReasonKeysUnavailable: true, ReasonBadSignature: true}
 		for _, r := range []Reason{ReasonMissingToken, ReasonMalformedToken, ReasonOversizedToken, ReasonBadAlgorithm, ReasonUnknownKey,
 			ReasonBadSignature, ReasonWrongIssuer, ReasonWrongAudience, ReasonExpired, ReasonNotYetValid, ReasonIssuedInFuture,
 			ReasonMissingClaim, ReasonAmbiguousIdentity, ReasonUnmappedPrincipal, ReasonKeysUnavailable, ReasonInvalidToken} {
-			if r.preSignature() != pre[r] {
-				t.Errorf("%s: preSignature = %t", r, r.preSignature())
+			c, limited := r.class()
+			want := classVerified
+			if unverified[r] {
+				want = classUnverified
+			}
+			if r == ReasonInvalidToken {
+				if limited {
+					t.Errorf("%s is limited", r)
+				}
+				continue
+			}
+			if !limited || c != want {
+				t.Errorf("%s: class %d limited %t, want class %d", r, c, limited, want)
 			}
 		}
 	})

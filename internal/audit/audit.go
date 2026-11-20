@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -78,10 +79,18 @@ func WithClock(now func() time.Time) Option {
 // appending. It refuses a path that is a symbolic link or is not a regular
 // file (checked before opening, so a FIFO cannot block it, and again on the
 // open file), whose mode gives group or other any access, or that is not
-// owned by the effective uid. Mode and owner are read from the open file,
+// owned by the effective uid, and a log whose directory group or other can
+// write. Mode and owner are read from the open file,
 // so the checks also hold for root. If the existing log does not end in a
 // newline, Open writes one.
 func Open(path string, opts ...Option) (*Logger, error) {
+	// Whoever can write the log's directory can unlink or replace the log
+	// while the gateway keeps writing to the old file.
+	if di, err := os.Stat(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("audit: directory of %s: %w", path, err)
+	} else if perm := di.Mode().Perm(); perm&0o022 != 0 {
+		return nil, fmt.Errorf("audit: the directory of %s is writable by group or other (mode %04o)", path, perm)
+	}
 	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() && fi.Mode()&os.ModeSymlink == 0 {
 		return nil, fmt.Errorf("audit: %s is not a regular file", path)
 	}

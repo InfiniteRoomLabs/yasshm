@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/configtest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
 
@@ -20,9 +22,7 @@ import (
 func TestE2ELostAfterKill(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	g, c := f.serve(t)
 	r := c.runCommand(t, "lab-1", "echo before-the-kill; sleep 300", map[string]any{"wait_seconds": 0})
 	c.waitOutput(t, r.CommandID, "before-the-kill")
 
@@ -37,9 +37,7 @@ func TestE2ELostAfterKill(t *testing.T) {
 			t.Fatal("a killed gateway wrote gateway.stopped")
 		}
 	})
-	g2 := f.start(t)
-	g2.waitReady(t)
-	c2 := connect(t, g2.edge(t))
+	g2, c2 := f.serve(t)
 	t.Run("happy/the restarted gateway reports lost with the output", func(t *testing.T) {
 		o := c2.readOutput(t, r.CommandID, nil)
 		if o.Status != "lost" || o.Data != "before-the-kill\n" || !o.EOF {
@@ -50,19 +48,12 @@ func TestE2ELostAfterKill(t *testing.T) {
 		if len(l.Commands) != 1 || l.Commands[0].CommandID != r.CommandID {
 			t.Fatalf("list = %+v", l)
 		}
-		found := false
-		lines, _ := f.auditLog(t)
-		for _, a := range lines {
-			found = found || (a.Event == "command.finished" && a.CommandID == r.CommandID && a.Status == "lost")
-		}
-		if !found {
+		if !f.finished(t, r.CommandID, "lost") {
 			t.Fatal("no command.finished with status lost")
 		}
 	})
 	t.Run("happy/the restarted gateway stops cleanly", func(t *testing.T) {
-		if code := g2.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g2.stop(t)
 	})
 	// A lost command may still run on the target (that is what lost
 	// means: the gateway no longer holds its session). The target ends it
@@ -77,9 +68,7 @@ func TestE2ELostAfterKill(t *testing.T) {
 func TestE2EGracefulShutdown(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	g, c := f.serve(t)
 	r := c.runCommand(t, "lab-1", "echo up; sleep 300", map[string]any{"wait_seconds": 0})
 	c.waitOutput(t, r.CommandID, "up")
 
@@ -107,9 +96,7 @@ func TestE2EGracefulShutdown(t *testing.T) {
 	var sent time.Time
 	t.Run("happy/SIGTERM exits 0", func(t *testing.T) {
 		sent = time.Now()
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g.stop(t)
 	})
 	t.Run("happy/the waiting request answered at once", func(t *testing.T) {
 		select {
@@ -144,10 +131,7 @@ func TestE2EGracefulShutdown(t *testing.T) {
 		if rest != "" {
 			t.Fatalf("an unterminated audit line: %q", rest)
 		}
-		found := false
-		for _, l := range lines {
-			found = found || (l.Event == "command.finished" && l.CommandID == r.CommandID && l.Status == "killed")
-		}
+		found := f.finished(t, r.CommandID, "killed")
 		last := lines[len(lines)-1]
 		if !found || last.Event != "gateway.stopped" || last.Reason != "signal" {
 			t.Fatalf("command.finished killed: %v; last event %+v", found, last)
@@ -157,17 +141,13 @@ func TestE2EGracefulShutdown(t *testing.T) {
 		}
 	})
 	t.Run("happy/a restarted gateway lists the command as killed", func(t *testing.T) {
-		g2 := f.start(t)
-		g2.waitReady(t)
-		c2 := connect(t, g2.edge(t))
+		g2, c2 := f.serve(t)
 		var l listCommandsResult
 		c2.ok(t, "list_commands", map[string]any{"server": "lab-1"}, &l)
 		if len(l.Commands) != 1 || l.Commands[0].Status != "killed" {
 			t.Fatalf("list = %+v", l)
 		}
-		if code := g2.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g2.stop(t)
 	})
 }
 
@@ -190,28 +170,8 @@ func TestE2ESecondGateway(t *testing.T) {
 		if r := c.runCommand(t, "lab-1", "echo still-here", map[string]any{"wait_seconds": 10}); r.Stdout != "still-here\n" {
 			t.Fatalf("run = %+v", r)
 		}
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g.stop(t)
 	})
-}
-
-// rewrite writes a variant of the config at path (old replaced by repl,
-// which must be there) and returns the new file's path.
-func rewrite(t *testing.T, path, old, repl string) string {
-	t.Helper()
-	b, err := os.ReadFile(path) //nolint:gosec // G304: the scenario's own config
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), old) {
-		t.Fatalf("%q is not in the config", old)
-	}
-	p := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(p, []byte(strings.Replace(string(b), old, repl, 1)), 0o600); err != nil { //nolint:gosec // G703: a path under t.TempDir
-		t.Fatal(err)
-	}
-	return p
 }
 
 // TestE2EConfigCheck: `yasshm config check` on a valid file exits 0 with
@@ -236,15 +196,19 @@ func TestE2EConfigCheck(t *testing.T) {
 			[]string{"server.colour"}},
 		{"sad/access full is not supported", "access: look}", "access: full}",
 			[]string{"access level full is not supported in this version"}},
-		{"sad/a bad host key and a bad limit", "limits: {", "limits: {max_wait_seconds: 500, ",
+		{"sad/a limit out of range", "limits: {", "limits: {max_wait_seconds: 500, ",
 			[]string{"limits.max_wait_seconds: must be between 1 and 110"}},
+		{"sad/a malformed host key", `host_key: "ssh-ed25519 `, `host_key: "ssh-ed25519 !!!`,
+			[]string{"(lab-1).host_key: does not parse as an OpenSSH public key"}},
 		{"raging/a missing key file", "private_key_file: /", "private_key_file: /nonexistent/",
-			[]string{"private_key_file"}},
-		{"raging/a YAML alias", "version: 1", "x: &a 1\nversion: 1",
-			[]string{"x"}},
+			[]string{"identities.id-0.private_key_file: file does not exist"}},
+		{"raging/a YAML anchor", "version: 1", "version: &v 1",
+			[]string{"version: anchors are not supported"}},
+		{"raging/a YAML alias", "version: 1\nserver:\n  listen: 127.0.0.1:0", "version: &v 1\nserver:\n  listen: *v",
+			[]string{"server.listen: aliases are not supported", "anchors are not supported"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := rewrite(t, f.config, tc.old, tc.repl)
+			p := configtest.Files{Config: f.config}.Rewrite(t, tc.old, tc.repl)
 			code, out, errs := run(t, "config", "check", "--config", p)
 			if code != 1 || out != "" {
 				t.Fatalf("exit %d, stdout %q, stderr %q", code, out, errs)
@@ -300,6 +264,38 @@ func TestE2ETwoTenantsRefused(t *testing.T) {
 		}
 		if _, err := os.Stat(f.audit); !os.IsNotExist(err) {
 			t.Fatalf("serve opened the audit log of a refused config: %v", err)
+		}
+	})
+}
+
+// TestE2ESIGHUPIgnored: a SIGHUP (a log-rotation hook's habit) does not
+// stop the gateway: it writes one log line, keeps serving, and still stops
+// cleanly on SIGTERM. The gateway also warns at start that certs_url (set
+// in every scenario's config) replaces the team domain's key set.
+func TestE2ESIGHUPIgnored(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	g, c := f.serve(t)
+	t.Run("happy/certs_url is announced at start", func(t *testing.T) {
+		if _, ok := g.waitLog(0, func(m map[string]any) bool {
+			return m["level"] == "WARN" && m["msg"] == "certs_url is set: signing keys are fetched from it instead of the team domain"
+		}); !ok {
+			t.Fatal("no certs_url warning")
+		}
+	})
+	t.Run("happy/SIGHUP is logged and ignored", func(t *testing.T) {
+		g.signal(syscall.SIGHUP)
+		if _, ok := g.waitLog(startBound, func(m map[string]any) bool {
+			return m["level"] == "WARN" && strings.HasPrefix(fmt.Sprint(m["msg"]), "SIGHUP ignored")
+		}); !ok {
+			t.Fatal("no SIGHUP log line")
+		}
+		if r := c.runCommand(t, "lab-1", "echo after-hup", map[string]any{"wait_seconds": 10}); r.Stdout != "after-hup\n" {
+			t.Fatalf("run = %+v", r)
+		}
+		g.stop(t)
+		if lines, _ := f.auditLog(t); lines[len(lines)-1].Event != "gateway.stopped" || lines[len(lines)-1].Reason != "signal" {
+			t.Fatalf("last event %+v", lines[len(lines)-1])
 		}
 	})
 }

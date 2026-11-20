@@ -108,8 +108,9 @@ run_sshd() {
 # The end-to-end suite (spec section 7, test/e2e): it builds the real binary
 # (CGO off, a normal build) and drives it as a child process; the test
 # process itself runs under -race. The test step leaves the package out, so
-# it runs once, here. The step fails unless every top-level TestE2E* scenario
-# reports PASS: the count comes from `go test -list`, not a constant, so
+# it runs once, here. The step fails unless TestScenarioTable passes (every
+# scenario in its table, the spec and the package) and every top-level
+# TestE2E* scenario reports PASS: the count comes from `go test -list`, not a constant, so
 # "ran zero scenarios" or "ran some" cannot pass. It needs no network beyond
 # loopback.
 run_e2e() {
@@ -132,6 +133,13 @@ run_e2e() {
   took=$(($(date +%s) - started))
   grep -E '^--- (PASS|FAIL): TestE2E' "$log" || true
   got=$(grep -cE '^--- PASS: TestE2E' "$log" || true)
+  # The scenario table (test/e2e/scenarios_test.go) ties the scenarios to
+  # spec section 7: a renamed or deleted scenario fails it.
+  if ! grep -qE '^--- PASS: TestScenarioTable' "$log"; then
+    cat "$log"
+    echo "e2e: TestScenarioTable did not pass" >&2
+    exit 1
+  fi
   if [ "${got:-0}" -ne "$want" ]; then
     cat "$log"
     echo "e2e: ${got:-0} of $want end-to-end scenarios passed; every scenario must pass" >&2

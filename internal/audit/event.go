@@ -188,12 +188,24 @@ func AuthRejected(requestID string, reason RejectReason, p tenant.Principal) Eve
 // a RejectReason: no single rejection carries it.
 const ReasonSuppressed = "suppressed"
 
+// The stages of a suppressed-rejections summary: which per-minute
+// allowance ran out.
+const (
+	// SuppressedUnverified counts rejections of a request whose token had
+	// no verified signature (none, malformed, a bad signature, ...).
+	SuppressedUnverified = "unverified"
+	// SuppressedVerified counts rejections of a token whose signature
+	// verified but that is not valid here (expired, another audience, an
+	// unmapped principal, ...).
+	SuppressedVerified = "verified"
+)
+
 // AuthRejectionsSuppressed records that count rejections were answered but
-// not written one by one, because the per-minute allowance for rejections
-// made before a signature was verified ran out (spec 5.7). It is the only
-// event with a count field.
-func AuthRejectionsSuppressed(count int64) Event {
-	r := record{Event: EventAuthRejected, Decision: "deny", Reason: ReasonSuppressed, Count: &count}
+// not written one by one, because a per-minute allowance ran out (spec
+// 5.7); stage is SuppressedUnverified or SuppressedVerified, naming the
+// allowance. It is the only event with a count field.
+func AuthRejectionsSuppressed(count int64, stage string) Event {
+	r := record{Event: EventAuthRejected, Decision: "deny", Reason: ReasonSuppressed, Count: &count, Stage: stage}
 	return Event{r}
 }
 

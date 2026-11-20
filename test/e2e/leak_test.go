@@ -204,9 +204,7 @@ func TestE2EResourceBounds(t *testing.T) {
 		}
 	})
 	t.Run("happy/no command is left on the target", func(t *testing.T) {
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g.stop(t)
 		if n := srv.Running(); n != 0 {
 			t.Fatalf("%d commands still running", n)
 		}

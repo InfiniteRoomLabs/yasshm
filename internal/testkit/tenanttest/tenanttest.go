@@ -23,9 +23,18 @@ func Limits() tenant.Limits {
 	}
 }
 
-// SSHOptions has short timings so the suites stay fast; its signature is
-// the engine's and the gateway's SSHOptions hook.
+// SSHOptions has a short kill grace so the suites stay fast; its signature
+// is the engine's and the gateway's SSHOptions hook. KillWait (also the
+// bound on a signal request's answer) is 5 seconds: at one second a reply
+// delayed by a machine running every package under -race was taken for a
+// silent server. Tests of a silent server set their own short options.
 func SSHOptions(tenant.Limits) sshclient.Options {
+	return sshclient.Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: 5 * time.Second}
+}
+
+// ShortSSHOptions is SSHOptions with a one-second KillWait, for tests that
+// wait out a server that never answers a signal.
+func ShortSSHOptions(tenant.Limits) sshclient.Options {
 	return sshclient.Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: time.Second}
 }
 

@@ -146,9 +146,7 @@ func TestE2EHealthz(t *testing.T) {
 		if status != http.StatusOK || strings.TrimSpace(body) != `{"status":"ok","version":"`+buildVersion+`"}` {
 			t.Fatalf("got %d %q", status, body)
 		}
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g.stop(t)
 	})
 	t.Run("sad/degraded when the issuer is down at start", func(t *testing.T) {
 		t.Parallel()
@@ -163,8 +161,6 @@ func TestE2EHealthz(t *testing.T) {
 		if status, _ := httpDo(t, http.MethodPost, e.URL+"/mcp", mcpHeader(), []byte(initializeBody)); status != http.StatusServiceUnavailable {
 			t.Fatalf("an MCP request with no key set: %d", status)
 		}
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g.stop(t)
 	})
 }

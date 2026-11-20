@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"syscall"
@@ -52,39 +53,43 @@ func TestE2EAuditUnwritable(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		tool string
-		args func(f *fixture, id string) map[string]any
+		args func(f *fixture, ids commandIDs) map[string]any
 	}{
-		{"run_command", func(*fixture, string) map[string]any {
+		{"run_command", func(*fixture, commandIDs) map[string]any {
 			return map[string]any{"server": longID, "command": "echo " + strings.Repeat("x", 2000)}
 		}},
-		{"read_output", func(_ *fixture, id string) map[string]any {
-			return map[string]any{"command_id": id, "stream": "stderr", "offset": 12345, "max_bytes": 4096, "wait_seconds": 1}
+		{"read_output", func(_ *fixture, ids commandIDs) map[string]any {
+			return map[string]any{"command_id": ids.done, "stream": "stderr", "offset": 12345, "max_bytes": 4096, "wait_seconds": 1}
 		}},
-		{"kill_command", func(_ *fixture, id string) map[string]any {
-			return map[string]any{"command_id": id, "signal": "KILL"}
+		{"kill_command", func(_ *fixture, ids commandIDs) map[string]any {
+			return map[string]any{"command_id": ids.running, "signal": "KILL"}
 		}},
-		{"list_commands", func(*fixture, string) map[string]any {
+		{"list_commands", func(*fixture, commandIDs) map[string]any {
 			return map[string]any{"server": longID, "status": "succeeded", "limit": 100}
 		}},
-		{"get_server_info", func(*fixture, string) map[string]any { return map[string]any{"server": longID} }},
-		{"download_file", func(f *fixture, _ string) map[string]any {
+		{"get_server_info", func(*fixture, commandIDs) map[string]any { return map[string]any{"server": longID} }},
+		{"download_file", func(f *fixture, _ commandIDs) map[string]any {
 			return map[string]any{"server": longID, "path": f.target(longID).Root + "/" + strings.Repeat("d", 200)}
 		}},
-		{"upload_file", func(f *fixture, _ string) map[string]any {
+		{"upload_file", func(f *fixture, _ commandIDs) map[string]any {
 			return map[string]any{"server": longID, "path": f.target(longID).Root + "/" + strings.Repeat("u", 200), "content": "x"}
 		}},
 	} {
 		t.Run("sad/"+tc.tool+" answers internal and does nothing", func(t *testing.T) {
 			t.Parallel()
 			f := newFixture(t, withTarget(longID, sshtest.Options{}))
-			g := f.start(t)
-			g.waitReady(t)
-			c := connect(t, g.edge(t))
-			// A command for read_output and kill_command to name (a
-			// command id is resolved before tool.called is written), and
+			g, c := f.serve(t)
+			// A command for read_output and kill_command to name, so a
+			// call that went ahead would act on a real command, and
 			// a call that shows the length of this principal's
 			// auth.accepted line.
-			done := c.runCommand(t, longID, "echo done", map[string]any{"wait_seconds": 10})
+			ids := commandIDs{done: c.runCommand(t, longID, "echo done", map[string]any{"wait_seconds": 10}).CommandID}
+			if tc.tool == "kill_command" {
+				// A running command, so a kill that went ahead would
+				// reach the target as a signal request.
+				ids.running = c.runCommand(t, longID, "echo up; sleep 300", map[string]any{"wait_seconds": 0}).CommandID
+				c.waitOutput(t, ids.running, "up")
+			}
 			c.ok(t, "list_servers", map[string]any{}, &listServersResult{})
 			authMax := lastAuthAcceptedMax(t, f)
 			fi, err := os.Stat(f.audit)
@@ -95,17 +100,20 @@ func TestE2EAuditUnwritable(t *testing.T) {
 			reqs, conns := sshRequests(srv)
 			limitFileSize(t, g.pid, fi.Size()+int64(authMax))
 
-			e := c.fail(t, tc.tool, tc.args(f, done.CommandID))
+			e := c.fail(t, tc.tool, tc.args(f, ids))
 			if e.Code != "internal" || e.Message != "the audit log could not be written, so nothing was done" {
 				t.Fatalf("error = %+v", e)
 			}
 			if r, cn := sshRequests(srv); r != reqs || cn != conns {
-				t.Fatalf("the target saw %d requests and %d connections", r-reqs, cn-conns)
+				t.Fatalf("the target saw %d requests and %d connections: %v", r-reqs, cn-conns, srv.Requests()[reqs:])
+			}
+			if ids.running != "" && srv.Running() == 0 {
+				t.Fatal("the command the refused kill named is no longer running")
 			}
 			// The log is closed for good: the guard refuses the next
-			// request before any tool (503).
-			if _, err := c.callErr(t, "list_servers", map[string]any{}); err == nil {
-				t.Fatal("a call after the failed write succeeded")
+			// request before any tool, with 503.
+			if status, body := httpDo(t, http.MethodPost, g.edge(t).URL+"/mcp", mcpHeader(), []byte(initializeBody)); status != http.StatusServiceUnavailable || strings.TrimSpace(body) != `{"error":"unavailable"}` {
+				t.Fatalf("a request after the failed write: %d %s", status, body)
 			}
 			lines, rest := f.auditLog(t)
 			// The last complete line is the request's auth.accepted; what
@@ -114,9 +122,7 @@ func TestE2EAuditUnwritable(t *testing.T) {
 			if last := lines[len(lines)-1]; last.Event != "auth.accepted" || strings.Contains(rest, "\n") {
 				t.Fatalf("last line %+v, unterminated rest %q", last, rest)
 			}
-			if code := g.stop(); code != 0 {
-				t.Fatalf("exit %d", code)
-			}
+			g.stop(t)
 			if _, ok := g.waitLog(0, func(m map[string]any) bool { return m["msg"] == "gateway.stopped cannot be written to the audit log" }); !ok {
 				t.Fatal("no log line saying gateway.stopped could not be written")
 			}
@@ -124,10 +130,53 @@ func TestE2EAuditUnwritable(t *testing.T) {
 	}
 }
 
-// lastAuthAcceptedMax returns the length, newline included, that the last
-// auth.accepted line of the audit log would have with the longest
-// timestamp: no later auth.accepted line of the same principal is longer.
-func lastAuthAcceptedMax(t *testing.T, f *fixture) int {
+// commandIDs are the commands a refused call may name: one that finished
+// and, for kill_command, one still running.
+type commandIDs struct{ done, running string }
+
+// TestE2EAuditUnwritableAtRequested: the tools layer wrote tool.called,
+// then the job engine cannot write command.requested: run_command answers
+// internal and no exec reaches the target. The limit is set so that the
+// call's auth.accepted and tool.called fit and nothing more. The audit log
+// is first padded with denied calls (they write the audit log only), so the
+// limit is above the database's size and the record insert before
+// command.requested still succeeds.
+func TestE2EAuditUnwritableAtRequested(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	g, c := f.serve(t)
+	command := "echo " + strings.Repeat("r", 3000)
+	c.runCommand(t, "lab-1", command, map[string]any{"wait_seconds": 10})
+	toolMax := lastLineMax(t, f, `"event":"tool.called"`)
+	for range 40 {
+		c.fail(t, "run_command", map[string]any{"server": "lab-1", "command": "sudo " + strings.Repeat("p", 6000)})
+	}
+	authMax := lastAuthAcceptedMax(t, f)
+	fi, err := os.Stat(f.audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := f.target("lab-1")
+	reqs, conns := sshRequests(srv)
+	limitFileSize(t, g.pid, fi.Size()+int64(authMax+toolMax))
+	t.Run("sad/run_command stops at command.requested", func(t *testing.T) {
+		e := c.fail(t, "run_command", map[string]any{"server": "lab-1", "command": command})
+		if e.Code != "internal" || e.Message != "the audit log could not be written, so nothing was done" {
+			t.Fatalf("error = %+v", e)
+		}
+		if r, cn := sshRequests(srv); r != reqs || cn != conns {
+			t.Fatalf("the target saw %d requests and %d connections: %v", r-reqs, cn-conns, srv.Requests()[reqs:])
+		}
+		lines, _ := f.auditLog(t)
+		if last := lines[len(lines)-1]; last.Event != "tool.called" || last.Tool != "run_command" {
+			t.Fatalf("last complete line %+v, want the call's tool.called", last)
+		}
+	})
+	g.stop(t)
+}
+
+// lastLineMax is lastAuthAcceptedMax for the last line holding marker.
+func lastLineMax(t *testing.T, f *fixture, marker string) int {
 	t.Helper()
 	b, err := os.ReadFile(f.audit)
 	if err != nil {
@@ -135,7 +184,7 @@ func lastAuthAcceptedMax(t *testing.T, f *fixture) int {
 	}
 	var last string
 	for _, l := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
-		if strings.Contains(l, `"event":"auth.accepted"`) {
+		if strings.Contains(l, marker) {
 			last = l
 		}
 	}
@@ -143,9 +192,17 @@ func lastAuthAcceptedMax(t *testing.T, f *fixture) int {
 		TS string `json:"ts"`
 	}
 	if err := json.Unmarshal([]byte(last), &rec); err != nil || rec.TS == "" {
-		t.Fatalf("auth.accepted line %q: %v", last, err)
+		t.Fatalf("line %q: %v", last, err)
 	}
 	return len(last) - len(rec.TS) + maxTSLen + 1
+}
+
+// lastAuthAcceptedMax returns the length, newline included, that the last
+// auth.accepted line of the audit log would have with the longest
+// timestamp: no later auth.accepted line of the same principal is longer.
+func lastAuthAcceptedMax(t *testing.T, f *fixture) int {
+	t.Helper()
+	return lastLineMax(t, f, `"event":"auth.accepted"`)
 }
 
 // TestE2EFileSizeLimit is the full-disk behaviour against the real binary
@@ -155,12 +212,13 @@ func lastAuthAcceptedMax(t *testing.T, f *fixture) int {
 // the limit, the way a full disk refuses it (ENOSPC). The command ends
 // with status error, the output up to the limit stays readable to its end,
 // its command.finished event is written, and the gateway keeps serving.
+// The limit binds the gateway's SQLite files too: the scenario holds only
+// while the database and its WAL stay under 128 KiB (about 45 KiB here),
+// since "keeps serving" inserts a record after the limit is set.
 func TestE2EFileSizeLimit(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	g := f.start(t)
-	g.waitReady(t)
-	c := connect(t, g.edge(t))
+	g, c := f.serve(t)
 	srv := f.target("lab-1")
 	const limit = 128 << 10
 	// The command waits for a file the test creates once the limit is
@@ -177,12 +235,7 @@ func TestE2EFileSizeLimit(t *testing.T) {
 		if o.Status != "error" || o.ErrorCode != "internal" || o.Size != limit || o.Data != "bbbb" || !o.EOF {
 			t.Fatalf("read = %+v", o)
 		}
-		found := false
-		lines, _ := f.auditLog(t)
-		for _, l := range lines {
-			found = found || (l.Event == "command.finished" && l.CommandID == r.CommandID && l.Status == "error")
-		}
-		if !found {
+		if !f.finished(t, r.CommandID, "error") {
 			t.Fatal("no command.finished with status error")
 		}
 	})
@@ -190,8 +243,6 @@ func TestE2EFileSizeLimit(t *testing.T) {
 		if r := c.runCommand(t, "lab-1", "echo after", map[string]any{"wait_seconds": 10}); r.Status != "succeeded" || r.Stdout != "after\n" {
 			t.Fatalf("run = %+v", r)
 		}
-		if code := g.stop(); code != 0 {
-			t.Fatalf("exit %d", code)
-		}
+		g.stop(t)
 	})
 }

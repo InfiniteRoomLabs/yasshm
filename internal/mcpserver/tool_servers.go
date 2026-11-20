@@ -149,6 +149,11 @@ func prepareServerInfo(_ context.Context, g *Gateway, c *call, raw json.RawMessa
 // serverInfo runs the probe with a deadline. A failed probe is a successful
 // answer with reachable false and the error code.
 func (g *Gateway) serverInfo(ctx context.Context, c *call) (result, error) {
+	release, err := g.takeTransfer(c)
+	if err != nil {
+		return result{}, err
+	}
+	defer release()
 	l := c.t.Limits
 	pctx, cancel := g.bounded(ctx, time.Duration(l.ConnectTimeoutSeconds)*time.Second+probeExtra)
 	defer cancel()
