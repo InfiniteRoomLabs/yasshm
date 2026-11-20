@@ -77,3 +77,20 @@ Run against a config made from the example with a generated key: `config check` 
 ## Not verified and left out
 
 Nothing was left out for lack of verification except dashboard clicks (see vendor facts). The guide's claim that Managed OAuth needs the Claude callback in the allowed URIs is marked INFERRED.
+
+## CI, log and status
+
+CI (`check`, includes the real-`sshd` lane and the new `deploy` and `docs` steps) on `7a7a41a`: completed success. `934c583` failed at `deploy` as described above and was fixed by `026dbfb`. CI does not run `release.yml`.
+
+`git log --oneline 038cdc0..7a7a41a`:
+
+```text
+7a7a41a docs(phase-7): add the implementer report
+026dbfb fix(gate): ignore systemd-analyze warnings about the host's own units
+bacdf45 docs: do not claim where the dashboard shows the AUD tag
+934c583 docs: add the operator guide, the install steps, the threat model and the quick start
+a47117d test(manual): add MT-001 to MT-005 and the check of their format
+cf2af7b feat(deploy): add the hardened unit, the example config, the release workflow and their checks
+```
+
+One more commit follows this section (the CI line itself). `git status --porcelain` was empty after the gate on `7a7a41a`.
