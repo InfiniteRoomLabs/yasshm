@@ -264,15 +264,19 @@ func TestRunCommand(t *testing.T) {
 			wantErr(t, h.call(t, userA, ToolRunCommand, tc.args), tc.code, tc.rule)
 		})
 	}
-	t.Run("edge/a wait above the cap is clamped", func(t *testing.T) {
-		start := time.Now()
-		r := h.run(t, userA, "srv-1", "sleep 30", map[string]any{"wait_seconds": 100000})
-		if r.Status != "running" || time.Since(start) > 25*time.Second {
-			t.Fatalf("run = %+v after %v", r, time.Since(start))
-		}
-		decode(t, h.call(t, userA, ToolKillCommand, map[string]any{"command_id": r.CommandID, "signal": "KILL"}), &KillResult{})
-		h.waitDone(t, userA, r.CommandID)
-	})
+}
+
+// TestRunCommandWaitClamped: a wait above max_wait_seconds is clamped, not
+// refused.
+func TestRunCommandWaitClamped(t *testing.T) {
+	h := newHarness(t, withLimits(func(l *tenant.Limits) { l.DefaultWaitSeconds, l.MaxWaitSeconds = 1, 1 }))
+	start := time.Now()
+	r := h.run(t, userA, "srv-1", "sleep 30", map[string]any{"wait_seconds": 100000})
+	if r.Status != "running" || time.Since(start) > 15*time.Second {
+		t.Fatalf("run = %+v after %v", r, time.Since(start))
+	}
+	decode(t, h.call(t, userA, ToolKillCommand, map[string]any{"command_id": r.CommandID, "signal": "KILL"}), &KillResult{})
+	h.waitDone(t, userA, r.CommandID)
 }
 
 // TestRunCommandBusy fills the per-server slots.
