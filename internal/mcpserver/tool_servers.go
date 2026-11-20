@@ -60,6 +60,10 @@ type ServerInfoResult struct {
 	Facts *Facts `json:"facts,omitempty"`
 	// ErrorCode says why the probe failed.
 	ErrorCode string `json:"error_code,omitempty"`
+	// Truncated is set when the answer was shortened to fit
+	// max_result_bytes (the facts cut, then the description and tags left
+	// to list_servers).
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 func entry(s *tenant.Server) ServerEntry {
@@ -167,12 +171,44 @@ func (g *Gateway) serverInfo(ctx context.Context, c *call) (result, error) {
 			res.Reachable, res.HostKeyOK = true, boolp(true)
 		}
 	}
-	return result{structured: res, text: serverInfoText(res)}, nil
+	return c.shrinkInfo(res), nil
 }
 
-func serverInfoText(r ServerInfoResult) string {
+// shrinkInfo returns the first form of res that fits the budget: whole;
+// with a short text; with each fact cut; without description and tags.
+func (c *call) shrinkInfo(res ServerInfoResult) result {
+	r := result{structured: res, text: serverInfoText(res, true)}
+	if encodedLen(successResult(r)) <= c.budget {
+		return r
+	}
+	res.Truncated = true
+	r = result{structured: res, text: serverInfoText(res, false)}
+	if encodedLen(successResult(r)) <= c.budget {
+		return r
+	}
+	if res.Facts != nil {
+		cut := func(s string) string { return fitText([]byte(s), c.budget/16, true).text }
+		f := *res.Facts
+		f.Kernel, f.Arch, f.OS = cut(f.Kernel), cut(f.Arch), cut(f.OS)
+		res.Facts = &f
+	}
+	r = result{structured: res, text: serverInfoText(res, false)}
+	if encodedLen(successResult(r)) <= c.budget {
+		return r
+	}
+	res.Description, res.Tags = "", nil
+	return result{structured: res, text: serverInfoText(res, false)}
+}
+
+// serverInfoText renders the answer; the short form leaves the
+// description, tags and facts to the structured content.
+func serverInfoText(r ServerInfoResult, long bool) string {
 	var b strings.Builder
-	b.WriteString(serverLine(r.ServerEntry))
+	if long {
+		b.WriteString(serverLine(r.ServerEntry))
+	} else {
+		b.WriteString(r.ID + " (" + r.Access + ")\n")
+	}
 	fmt.Fprintf(&b, "reachable: %v, latency %d ms", r.Reachable, r.LatencyMS)
 	if r.HostKeyOK != nil {
 		fmt.Fprintf(&b, ", host key ok: %v", *r.HostKeyOK)
@@ -181,7 +217,7 @@ func serverInfoText(r ServerInfoResult) string {
 		fmt.Fprintf(&b, ", error: %s", r.ErrorCode)
 	}
 	b.WriteString("\n")
-	if r.Facts != nil {
+	if r.Facts != nil && long {
 		fmt.Fprintf(&b, "kernel: %s\narch: %s\nos: %s\nuptime: %d s\n", r.Facts.Kernel, r.Facts.Arch, r.Facts.OS, r.Facts.UptimeSeconds)
 	}
 	return b.String()

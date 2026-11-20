@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -160,6 +161,10 @@ type harness struct {
 	url     string
 	logs    *syncBuffer
 	tenants []tenant.Tenant
+	// inFlight is the gateway's MaxInFlight (0: derived).
+	inFlight int
+	pe       *policy.Engine
+	guard    *auth.Guard
 
 	mu       sync.Mutex
 	sessions map[string]*mcp.ClientSession
@@ -173,6 +178,10 @@ func withLimits(f func(l *tenant.Limits)) hopt {
 			f(&ts[i].Limits)
 		}
 	}
+}
+
+func withInFlight(n int) hopt {
+	return func(h *harness, _ []tenant.Tenant) { h.inFlight = n }
 }
 
 func withTenants(f func(ts []tenant.Tenant)) hopt {
@@ -219,6 +228,7 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.pe = pe
 	h.is = accesstest.New(t, nil)
 	ca, err := auth.NewCloudflareAccess(h.is.Config(), h.tenants)
 	if err != nil {
@@ -229,15 +239,21 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	waitReady(t, ca)
 	guard := auth.NewGuard(ca, h.au, auth.WithMiddlewareLogger(logger))
 	t.Cleanup(guard.Close)
+	h.guard = guard
 	h.gw, err = New(Config{
 		Version: "test", Tenants: h.tenants, Policy: pe, Jobs: h.e, Audit: h.au, Guard: guard,
-		Health: ca, SSHOptions: testSSH, Logger: logger,
+		Health: ca, SSHOptions: testSSH, Logger: logger, MaxInFlight: h.inFlight,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.url = serve(t, h.gw.HTTPServer())
 	return h
+}
+
+// newHarnessTenants returns the harness's two tenants without servers.
+func newHarnessTenants() []tenant.Tenant {
+	return []tenant.Tenant{{ID: tA, Limits: testLimits()}, {ID: tB, Limits: testLimits()}}
 }
 
 // waitReady waits until the authenticator has loaded the issuer's keys.
@@ -401,6 +417,9 @@ func wantErr(t *testing.T, r *mcp.CallToolResult, code, rule string) ToolError {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&e); err != nil {
 		t.Fatalf("error content %s: %v", b, err)
+	}
+	if !slices.Contains(Codes, e.Code) || len(Codes) != 10 {
+		t.Fatalf("code %q is not one of the ten of spec 5.8", e.Code)
 	}
 	if e.Code != code || (rule != "" && e.Rule != rule) {
 		t.Fatalf("error = %+v, want code %s rule %q", e, code, rule)
