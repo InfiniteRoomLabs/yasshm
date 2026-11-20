@@ -190,6 +190,9 @@ type hooks struct {
 	// beforeSignal runs in Kill between marking the kill and sending the
 	// signal (nil in production).
 	beforeSignal func(j *job)
+	// beforeRelease runs in run after the end is recorded and before the
+	// slots are released (nil in production).
+	beforeRelease func(j *job)
 }
 
 func (e *Engine) hooks() hooks {
@@ -521,13 +524,19 @@ func (e *Engine) run(j *job, release func()) {
 	}
 	f.MayStillRun = st.MayStillRun || may
 	e.recordEnd(e.root, j, f, j.start, true)
+	j.cancel(nil)
+	j.stopT()
+	if hook := e.hooks().beforeRelease; hook != nil {
+		hook(j)
+	}
+	release()
+	e.wakeJanitor()
+	// The handle stays live until the very end: while it is in the map,
+	// Get, Wait and ReadOutput report the command running, whatever the
+	// store says, so nobody sees it finished before its slot is free.
 	e.mu.Lock()
 	delete(e.jobs, key{j.tid, j.id})
 	e.mu.Unlock()
-	j.cancel(nil)
-	j.stopT()
-	release()
-	e.wakeJanitor()
 	close(j.done)
 }
 
@@ -649,9 +658,26 @@ func (e *Engine) Get(ctx context.Context, tid tenant.TenantID, id tenant.Command
 	return r, nil
 }
 
-// overlay replaces a running record's counters with the live ones, or its
-// end with the one this engine could not write yet.
+// overlay makes a record say what this engine knows. While the engine holds
+// a live handle for the command (until its end is recorded, its event
+// written and its slots released), the record says running with the live
+// counters, whatever the store says (a record another process marked lost,
+// or one whose end was just written). After that, an end this engine could
+// not write yet replaces a stored running status.
 func (e *Engine) overlay(r *Record) {
+	if j := e.live(r.Tenant, r.ID); j != nil {
+		select {
+		case <-j.done:
+		default:
+			snap := j.cap.snapshot()
+			r.Status, r.FinishedAt, r.ExitCode, r.Signal, r.ErrorCode = StatusRunning, time.Time{}, nil, "", ""
+			r.StdoutBytes, r.StderrBytes, r.StoredBytes, r.Truncated = snap.received[outIdx], snap.received[errIdx], snap.stored, snap.truncated
+			j.mu.Lock()
+			r.MayStillRun = r.MayStillRun || j.mayStillRun
+			j.mu.Unlock()
+			return
+		}
+	}
 	if r.Status != StatusRunning {
 		return
 	}
@@ -662,17 +688,7 @@ func (e *Engine) overlay(r *Record) {
 		f := p.f
 		r.Status, r.ExitCode, r.Signal, r.ErrorCode, r.FinishedAt = f.Status, f.ExitCode, f.Signal, f.ErrorCode, f.FinishedAt.UTC().Truncate(time.Microsecond)
 		r.StdoutBytes, r.StderrBytes, r.StoredBytes, r.Truncated, r.MayStillRun = f.StdoutBytes, f.StderrBytes, f.StoredBytes, f.Truncated, r.MayStillRun || f.MayStillRun
-		return
 	}
-	j := e.live(r.Tenant, r.ID)
-	if j == nil {
-		return
-	}
-	snap := j.cap.snapshot()
-	r.StdoutBytes, r.StderrBytes, r.StoredBytes, r.Truncated = snap.received[outIdx], snap.received[errIdx], snap.stored, snap.truncated
-	j.mu.Lock()
-	r.MayStillRun = r.MayStillRun || j.mayStillRun
-	j.mu.Unlock()
 }
 
 // Wait waits up to d (at most the tenant's max_wait_seconds) for the

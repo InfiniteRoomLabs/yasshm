@@ -461,3 +461,63 @@ func TestLeaks(t *testing.T) {
 		}
 	})
 }
+
+func TestLiveHandleIsNotFinished(t *testing.T) {
+	t.Parallel()
+	for _, lost := range []bool{false, true} {
+		name := "corner/a command whose end is recorded but whose slot is still held is running"
+		if lost {
+			name = "raging/a live command whose record another process marked lost is running until its slot is free"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, withLimits(func(l *tenant.Limits) { l.MaxConcurrentPerServer = 1 }))
+			reached, proceed := make(chan struct{}), make(chan struct{})
+			h.e.setHooks(func(hk *hooks) {
+				hk.beforeRelease = func(*job) {
+					close(reached)
+					<-proceed
+				}
+			})
+			r := h.start("echo x; sleep 30", StartOptions{})
+			if _, err := h.e.ReadOutput(t.Context(), tA, r.ID, ReadRequest{Stream: StreamStdout, Wait: 10 * time.Second}); err != nil {
+				t.Fatal(err)
+			}
+			if lost {
+				if _, err := h.e.st.RecoverAllTenants(t.Context(), time.Now(), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := h.e.Kill(t.Context(), tA, h.actorA, r.ID, SignalKill); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-reached:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the command did not end")
+			}
+			if g, err := h.e.Get(t.Context(), tA, r.ID); err != nil || g.Status != StatusRunning {
+				t.Errorf("get while the slot is held: %v %+v", err, g)
+			}
+			if g, err := h.e.Wait(t.Context(), tA, r.ID, 50*time.Millisecond); err != nil || g.Status != StatusRunning {
+				t.Errorf("wait while the slot is held: %v %+v", err, g)
+			}
+			if o, err := h.e.ReadOutput(t.Context(), tA, r.ID, ReadRequest{Stream: StreamStdout}); err != nil || o.EOF {
+				t.Errorf("read while the slot is held: %v %+v", err, o)
+			}
+			close(proceed)
+			g, err := h.e.Wait(t.Context(), tA, r.ID, 10*time.Second)
+			want := StatusKilled
+			if lost {
+				want = StatusLost
+			}
+			if err != nil || g.Status != want {
+				t.Fatalf("%v %+v", err, g)
+			}
+			if o, err := h.e.ReadOutput(t.Context(), tA, r.ID, ReadRequest{Stream: StreamStdout}); err != nil || !o.EOF {
+				t.Fatalf("%v %+v", err, o)
+			}
+			h.noSlots(h.e)
+		})
+	}
+}
