@@ -51,7 +51,7 @@ The architecture is modelled as code with [LikeC4](https://likec4.dev) in `docs/
 ## Contributing
 
 - Toolchain via [mise](https://mise.jdx.dev/): `scripts/bootstrap.sh` or `mise install`. Go and golangci-lint are pinned in `mise.toml`; Node and pnpm are there only for LikeC4.
-- The gate: `mise run check` runs `fmt lint skipcheck test sshd cover vuln build arch` and fails on a dirty tree; `mise run check -- <step>` runs one step. `mise run build` writes `dist/yasshm_<version>_linux_{amd64,arm64}` and `dist/SHA256SUMS`. See `TESTING.md` for the testing rules.
+- The gate: `mise run check` runs `fmt lint skipcheck test sshd e2e cover vuln build arch` and fails on a dirty tree; `mise run check -- <step>` runs one step. The `e2e` step builds the real binary and runs the end-to-end suite (`test/e2e`) against it. `mise run build` writes `dist/yasshm_<version>_linux_{amd64,arm64}` and `dist/SHA256SUMS`. See `TESTING.md` for the testing rules.
 - Commits: [Conventional Commits](https://www.conventionalcommits.org/), imperative mood, scoped.
 - If you use Claude Code, install the [agent-ops marketplace](https://github.com/InfiniteRoomLabs/agent-ops) -- it provides the changelog guard that keeps `CHANGELOG.md` honest and the goal loop this repo is built with (`GOAL.md`).
 - `scripts/redaction-check.sh` (a pre-commit hygiene check) is optional for outside contributors; it no-ops when `REDACTION_TERMS_RESOLVER` is not set.

@@ -105,6 +105,41 @@ run_sshd() {
   echo "sshd: $real of $inproc contract scenarios passed against real sshd, and the login test"
 }
 
+# The end-to-end suite (spec section 7, test/e2e): it builds the real binary
+# (CGO off, a normal build) and drives it as a child process; the test
+# process itself runs under -race. The test step leaves the package out, so
+# it runs once, here. The step fails unless every top-level TestE2E* scenario
+# reports PASS: the count comes from `go test -list`, not a constant, so
+# "ran zero scenarios" or "ran some" cannot pass. It needs no network beyond
+# loopback.
+run_e2e() {
+  echo "== e2e =="
+  local log want got started took
+  log=$(mktemp)
+  # shellcheck disable=SC2064
+  trap "rm -f '$log'" RETURN
+  want=$(cd "$repo_root" && mise exec -- go test -list '^TestE2E' ./test/e2e | grep -cE '^TestE2E' || true)
+  if [ "${want:-0}" -lt 1 ]; then
+    echo "e2e: go test -list found no TestE2E* scenarios in test/e2e" >&2
+    exit 1
+  fi
+  started=$(date +%s)
+  if ! (cd "$repo_root" && CGO_ENABLED=1 mise exec -- go test -race -shuffle=on -count=1 -v ./test/e2e) >"$log" 2>&1; then
+    cat "$log"
+    echo "e2e: the end-to-end suite failed" >&2
+    exit 1
+  fi
+  took=$(($(date +%s) - started))
+  grep -E '^--- (PASS|FAIL): TestE2E' "$log" || true
+  got=$(grep -cE '^--- PASS: TestE2E' "$log" || true)
+  if [ "${got:-0}" -ne "$want" ]; then
+    cat "$log"
+    echo "e2e: ${got:-0} of $want end-to-end scenarios passed; every scenario must pass" >&2
+    exit 1
+  fi
+  echo "e2e: $got of $want end-to-end scenarios passed against the real binary in ${took}s (uid $(id -u))"
+}
+
 run_cover() {
   echo "== cover =="
   if [ ! -s "$coverage_profile" ]; then
@@ -163,7 +198,7 @@ run_arch() {
   # when this project has a Node test runner.
 }
 
-steps=(fmt lint skipcheck test sshd cover vuln build arch)
+steps=(fmt lint skipcheck test sshd e2e cover vuln build arch)
 
 run_step() {
   case "$1" in
@@ -172,6 +207,7 @@ run_step() {
   skipcheck) run_skipcheck ;;
   test) run_test ;;
   sshd) run_sshd ;;
+  e2e) run_e2e ;;
   cover) run_cover ;;
   vuln) run_vuln ;;
   build) run_build ;;

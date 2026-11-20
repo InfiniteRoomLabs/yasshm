@@ -80,7 +80,7 @@ The architecture is modelled as code in `docs/architecture/*.c4` and is part of 
 
 ```bash
 scripts/bootstrap.sh                  # mise + pinned toolchain on a bare machine; no-op when current
-mise run check                        # the gate: fmt lint skipcheck test sshd cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
+mise run check                        # the gate: fmt lint skipcheck test sshd e2e cover vuln build arch, then fails on a dirty tree; `mise run check -- <step>` for one
 mise run build                        # dist/yasshm_<version>_linux_{amd64,arm64} + dist/SHA256SUMS
 mise run test                         # go test -race with coverage.out (the gate's test step uses it)
 mise run lint                         # golangci-lint
