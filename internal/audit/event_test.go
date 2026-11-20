@@ -114,6 +114,13 @@ func TestEvents(t *testing.T) {
 		if strings.Join(got, ",") != "missing_token,invalid_token,unmapped_principal,keys_unavailable" {
 			t.Fatalf("got %v", got)
 		}
+		got = []string{RejectMalformedToken.String(), RejectOversizedToken.String(), RejectBadAlgorithm.String(), RejectUnknownKey.String(),
+			RejectBadSignature.String(), RejectWrongIssuer.String(), RejectWrongAudience.String(), RejectExpired.String(),
+			RejectNotYetValid.String(), RejectIssuedInFuture.String(), RejectMissingClaim.String(), RejectAmbiguousIdentity.String()}
+		want := "malformed_token,oversized_token,bad_algorithm,unknown_key,bad_signature,wrong_issuer,wrong_audience,expired,not_yet_valid,issued_in_future,missing_claim,ambiguous_identity"
+		if strings.Join(got, ",") != want {
+			t.Fatalf("got %v", got)
+		}
 	})
 }
 

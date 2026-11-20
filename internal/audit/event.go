@@ -108,6 +108,37 @@ var (
 	RejectUnmappedPrincipal = RejectReason{"unmapped_principal"}
 	// RejectKeysUnavailable: the signing keys could not be fetched.
 	RejectKeysUnavailable = RejectReason{"keys_unavailable"}
+
+	// The finer reasons below were added in Phase 4 (spec 5.7): each names
+	// the one check of the authenticator that refused the token.
+
+	// RejectMalformedToken: the token is not a compact JWS with a JSON
+	// header and claims, or the header was sent more than once.
+	RejectMalformedToken = RejectReason{"malformed_token"}
+	// RejectOversizedToken: the token is longer than the authenticator's cap.
+	RejectOversizedToken = RejectReason{"oversized_token"}
+	// RejectBadAlgorithm: the token's alg is not RS256.
+	RejectBadAlgorithm = RejectReason{"bad_algorithm"}
+	// RejectUnknownKey: the token has no kid, or its kid is not in the key set.
+	RejectUnknownKey = RejectReason{"unknown_key"}
+	// RejectBadSignature: the signature does not verify with the named key.
+	RejectBadSignature = RejectReason{"bad_signature"}
+	// RejectWrongIssuer: iss is not the team domain.
+	RejectWrongIssuer = RejectReason{"wrong_issuer"}
+	// RejectWrongAudience: aud does not contain the application's AUD tag.
+	RejectWrongAudience = RejectReason{"wrong_audience"}
+	// RejectExpired: exp is in the past, beyond the leeway.
+	RejectExpired = RejectReason{"expired"}
+	// RejectNotYetValid: nbf is in the future, beyond the leeway.
+	RejectNotYetValid = RejectReason{"not_yet_valid"}
+	// RejectIssuedInFuture: iat is in the future, beyond the leeway.
+	RejectIssuedInFuture = RejectReason{"issued_in_future"}
+	// RejectMissingClaim: a required claim (exp, nbf, iat, or an identity
+	// claim) is absent.
+	RejectMissingClaim = RejectReason{"missing_claim"}
+	// RejectAmbiguousIdentity: the token names both a user and a service
+	// token.
+	RejectAmbiguousIdentity = RejectReason{"ambiguous_identity"}
 )
 
 // String returns the reason's text.
