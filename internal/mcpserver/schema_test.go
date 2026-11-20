@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -235,5 +236,16 @@ func TestDecodeArgs(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.err)
 			}
 		})
+	}
+}
+
+// BenchmarkNewServer measures the per-request cost of the F6 mechanism:
+// one MCP server with the eight tools, built for every /mcp request.
+func BenchmarkNewServer(b *testing.B) {
+	g := &Gateway{defs: toolDefs(), log: slog.New(slog.DiscardHandler), sdkLogs: slog.New(slog.DiscardHandler)}
+	a := audit.Actor{RequestID: "r", Principal: tenant.Principal{Tenant: tA, Kind: tenant.KindUser, Subject: userA}}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = g.newServer(a)
 	}
 }
