@@ -321,7 +321,9 @@ func (e *Engine) liveStored(tid tenant.TenantID) int64 {
 	e.mu.Unlock()
 	var n int64
 	for _, j := range js {
-		n += j.cap.snapshot().stored
+		if !j.recorded.Load() {
+			n += j.cap.snapshot().stored
+		}
 	}
 	return n
 }

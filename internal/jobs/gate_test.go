@@ -521,3 +521,41 @@ func TestLiveHandleIsNotFinished(t *testing.T) {
 		})
 	}
 }
+
+// TestUsageCountsAFinishedCommandOnce (Phase 6 review gate, seen as a
+// TestDataQuota flake under load): between the end written to the store
+// and the handle leaving the live map, the command's output is counted by
+// the store; the live count must not add it again, or a janitor pass in
+// that window sees the tenant over max_data_bytes and deletes the record.
+func TestUsageCountsAFinishedCommandOnce(t *testing.T) {
+	t.Parallel()
+	const cmd = "printf 0123456789"
+	h := newHarness(t)
+	reached, proceed := make(chan struct{}), make(chan struct{})
+	var inWindow int64
+	h.e.setHooks(func(hk *hooks) {
+		hk.beforeRelease = func(j *job) {
+			n, err := h.e.usedBytes(context.Background(), j.tid)
+			if err != nil {
+				t.Error(err)
+			}
+			inWindow = n
+			close(reached)
+			<-proceed
+		}
+	})
+	r := h.start(cmd, StartOptions{})
+	select {
+	case <-reached:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the command never reached the release")
+	}
+	want := int64(10 + len(cmd) + store.RowCost)
+	close(proceed)
+	h.wait(r.ID)
+	t.Run("corner/usage in the window between the record and the release", func(t *testing.T) {
+		if inWindow != want {
+			t.Fatalf("usage %d, want %d (the output counted once)", inWindow, want)
+		}
+	})
+}

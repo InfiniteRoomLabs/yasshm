@@ -139,6 +139,11 @@ type job struct {
 	mu            sync.Mutex
 	killRequested bool
 	mayStillRun   bool
+
+	// recorded is set once the end is written to the store, whose usage
+	// then counts the output: liveStored stops counting it here, so a
+	// finished command still in the live map is not counted twice.
+	recorded atomic.Bool
 }
 
 // pendingEnd is a command whose end could not be written to the store (a
@@ -524,6 +529,7 @@ func (e *Engine) run(j *job, release func()) {
 	}
 	f.MayStillRun = st.MayStillRun || may
 	e.recordEnd(e.root, j, f, j.start, true)
+	j.recorded.Store(true)
 	j.cancel(nil)
 	j.stopT()
 	if hook := e.hooks().beforeRelease; hook != nil {
