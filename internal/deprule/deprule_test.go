@@ -195,3 +195,42 @@ func fileImports(t *testing.T, path string) []string {
 	}
 	return out
 }
+
+// e2eAllowed lists the packages of this module the end-to-end suite
+// (test/e2e) may import: the test kits (the world around the binary) and the
+// audit log and store packages, only to read what the gateway wrote. Every
+// answer it checks must come from the binary, so the packages that compute
+// those answers are forbidden (e2eForbidden, kept apart so a widened
+// e2eAllowed cannot quietly admit one).
+var (
+	e2eAllowed   = []string{"internal/testkit", "internal/audit", "internal/store"}
+	e2eForbidden = []string{"internal/mcpserver", "internal/jobs", "internal/policy", "internal/auth", "internal/sshclient", "internal/cli", "internal/config", "cmd"}
+)
+
+// TestEndToEndImports enforces the import rule of test/e2e (its doc.go):
+// only the test kits and, to read what the gateway wrote, internal/audit
+// and internal/store.
+func TestEndToEndImports(t *testing.T) {
+	dir := filepath.Join("..", "..", "test", "e2e")
+	prod, test := moduleImports(t, dir)
+	t.Run("happy/the suite imports only what its doc allows", func(t *testing.T) {
+		if len(test) == 0 {
+			t.Fatal("test/e2e has no test files importing the module; the walk read the wrong directory")
+		}
+		for imp, files := range prod {
+			t.Errorf("a non-test file of test/e2e imports %s (in %v); the package holds no code", imp, files)
+		}
+		for imp, files := range test {
+			if !contains(e2eAllowed, imp) || contains(e2eForbidden, imp) {
+				t.Errorf("test/e2e imports %s (in %v); allowed: %v", imp, files, e2eAllowed)
+			}
+		}
+	})
+	t.Run("sad/no forbidden package is allowed", func(t *testing.T) {
+		for _, f := range e2eForbidden {
+			if contains(e2eAllowed, f) {
+				t.Errorf("%s is both allowed and forbidden", f)
+			}
+		}
+	})
+}

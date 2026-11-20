@@ -49,7 +49,8 @@ run = "scripts/build.sh"
 description = "Tests with -race and a coverage profile (coverage.out)"
 # -race needs CGO for the test binary only; builds stay CGO off.
 env = { CGO_ENABLED = "1" }
-run = "go test -race -shuffle=on -count=1 -coverpkg=./... -coverprofile=coverage.out ./..."
+# test/e2e is left out: the gate's e2e step runs it (scripts/check.sh).
+run = "go test -race -shuffle=on -count=1 -coverpkg=./... -coverprofile=coverage.out $(go list ./... | grep -v '/test/e2e$')"
 
 [tasks.lint]
 description = "golangci-lint (warnings are errors)"
