@@ -155,7 +155,7 @@ run_e2e() {
 # tests that read the example (internal/config), and `systemd-analyze verify`
 # on a copy of the unit whose binary path points at a stub, where the tool
 # exists. verify exits 0 on an unknown directive and prints a warning, so any
-# output from it fails the step.
+# line it prints about the unit fails the step.
 run_deploy() {
   echo "== deploy =="
   local log tmp out
@@ -190,9 +190,13 @@ run_deploy() {
     echo "deploy: systemd-analyze verify failed" >&2
     exit 1
   }
-  if [ -n "$out" ]; then
-    echo "$out" >&2
-    echo "deploy: systemd-analyze verify printed warnings" >&2
+  # verify also reads the host's own units and may warn about them (seen on the
+  # CI runner: CPUAccounting= in the cloud agent's units); only a line about
+  # this unit counts.
+  ours=$(printf '%s\n' "$out" | grep -F 'yasshm.service' || true)
+  if [ -n "$ours" ]; then
+    echo "$ours" >&2
+    echo "deploy: systemd-analyze verify printed warnings about the unit" >&2
     exit 1
   fi
   echo "deploy: systemd-analyze verify passed on deploy/yasshm.service ($(systemd-analyze --version | head -1))"
