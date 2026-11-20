@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/configtest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/syncbuf"
 )
 
 // runMainEnv makes the test binary act as yasshm: TestMain calls main
@@ -114,7 +114,7 @@ func TestServeSignal(t *testing.T) {
 	}
 	cmd := exec.Command(exe, "serve", "--config", cfg) //nolint:gosec // G204: the test binary itself, with test arguments
 	cmd.Env = append(os.Environ(), runMainEnv+"=1")
-	var errb lockedBuffer
+	var errb syncbuf.Buffer
 	cmd.Stderr = &errb
 	if serr := cmd.Start(); serr != nil {
 		t.Fatal(serr)
@@ -145,23 +145,4 @@ func TestServeSignal(t *testing.T) {
 	if !strings.Contains(lines[0], `"event":"gateway.started"`) || !strings.Contains(lines[len(lines)-1], `"event":"gateway.stopped","reason":"signal"`) {
 		t.Fatalf("audit log:\n%s", log)
 	}
-}
-
-// lockedBuffer is a buffer a child process's output can be copied into
-// while the test reads it.
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
 }

@@ -1,16 +1,12 @@
 package mcpserver
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -21,15 +17,16 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/auth"
 	"github.com/InfiniteRoomLabs/yasshm/internal/jobs"
 	"github.com/InfiniteRoomLabs/yasshm/internal/policy"
-	"github.com/InfiniteRoomLabs/yasshm/internal/sshclient"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/accesstest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/syncbuf"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/tenanttest"
 )
 
 const (
@@ -40,116 +37,6 @@ const (
 	svcB  = "svc-b.access"
 )
 
-func testLimits() tenant.Limits {
-	return tenant.Limits{
-		DefaultWaitSeconds: 5, MaxWaitSeconds: 10, DefaultTimeoutSeconds: 30, MaxTimeoutSeconds: 60,
-		MaxConcurrentCommands: 4, MaxConcurrentPerServer: 2, MaxCommandBytes: 8192, MaxOutputBytes: 1 << 20,
-		MaxResultBytes: 100000, RetentionDays: 7, MaxDataBytes: 1 << 30, MaxUploadBytes: 1 << 20,
-		KillGraceSeconds: 1, ConnectTimeoutSeconds: 5, ShutdownGraceSeconds: 10,
-	}
-}
-
-// testSSH has short timings so the suite stays fast.
-func testSSH(tenant.Limits) sshclient.Options {
-	return sshclient.Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: time.Second}
-}
-
-func serverFor(tid tenant.TenantID, sid tenant.ServerID, s *sshtest.Server) tenant.Server {
-	return tenant.Server{
-		Tenant: tid, ID: sid, Host: s.Host, Port: s.Port, Access: tenant.AccessLook, HostKey: s.HostKeyLine(),
-		Description: "test server " + string(sid), Tags: []string{"test"},
-		Identity: tenant.Identity{ID: "look", User: s.User, PrivateKeyFile: s.ClientKeyFile},
-	}
-}
-
-// failAudit is the real audit logger with switches that make named events
-// fail, the way a full disk would.
-type failAudit struct {
-	l    *audit.Logger
-	path string
-	mu   sync.Mutex
-	fail map[string]bool
-}
-
-func (a *failAudit) setFail(name string, on bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.fail[name] = on
-}
-
-func (a *failAudit) Write(ev audit.Event) error {
-	a.mu.Lock()
-	f := a.fail[ev.Name()]
-	a.mu.Unlock()
-	if f {
-		return errors.New("audit write failed (test)")
-	}
-	return a.l.Write(ev)
-}
-
-func (a *failAudit) Before(ev audit.Event, act func() error) error {
-	if err := a.Write(ev); err != nil {
-		return err
-	}
-	return act()
-}
-
-// auditLine is the part of an audit line the tests read.
-type auditLine struct {
-	Event     string          `json:"event"`
-	RequestID string          `json:"request_id"`
-	Tenant    string          `json:"tenant"`
-	Principal string          `json:"principal"`
-	Tool      string          `json:"tool"`
-	Server    string          `json:"server"`
-	CommandID string          `json:"command_id"`
-	Code      string          `json:"code"`
-	Rule      string          `json:"rule"`
-	Stage     string          `json:"stage"`
-	Path      string          `json:"path"`
-	Command   string          `json:"command"`
-	Status    string          `json:"status"`
-	Args      json.RawMessage `json:"args"`
-}
-
-// lines returns every audit event so far.
-func (a *failAudit) lines(t *testing.T) []auditLine {
-	t.Helper()
-	b, err := os.ReadFile(a.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []auditLine
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	sc.Buffer(make([]byte, 1<<20), 1<<22)
-	for sc.Scan() {
-		var l auditLine
-		if err := json.Unmarshal(sc.Bytes(), &l); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, l)
-	}
-	return out
-}
-
-// syncBuffer is a log sink safe for concurrent writers.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
-}
-
 // harness is a gateway with two tenants built in code, real sshtest
 // targets, a real audit log, a real job engine on SQLite and the local
 // issuer, served on a loopback port.
@@ -157,11 +44,11 @@ type harness struct {
 	t       *testing.T
 	sa, sb  *sshtest.Server
 	is      *accesstest.Issuer
-	au      *failAudit
+	au      *audittest.FailLog
 	e       *jobs.Engine
 	gw      *Gateway
 	url     string
-	logs    *syncBuffer
+	logs    *syncbuf.Buffer
 	tenants []tenant.Tenant
 	// inFlight is the gateway's MaxInFlight (0: derived).
 	inFlight int
@@ -195,32 +82,27 @@ func withTenants(f func(ts []tenant.Tenant)) hopt {
 
 func newHarness(t *testing.T, opts ...hopt) *harness {
 	t.Helper()
-	h := &harness{t: t, logs: &syncBuffer{}, sessions: map[string]*mcp.ClientSession{}}
+	h := &harness{t: t, logs: &syncbuf.Buffer{}, sessions: map[string]*mcp.ClientSession{}}
 	h.sa = sshtest.Start(t, sshtest.Options{})
 	h.sb = sshtest.Start(t, sshtest.Options{})
 	h.tenants = []tenant.Tenant{
 		{
-			ID: tA, Limits: testLimits(), Principals: []tenant.PrincipalMatch{{Email: userA}},
-			Servers: []tenant.Server{serverFor(tA, "srv-1", h.sa), serverFor(tA, "srv-2", h.sa)},
+			ID: tA, Limits: tenanttest.Limits(), Principals: []tenant.PrincipalMatch{{Email: userA}},
+			Servers: []tenant.Server{tenanttest.Server(tA, "srv-1", h.sa), tenanttest.Server(tA, "srv-2", h.sa)},
 		},
 		{
-			ID: tB, Limits: testLimits(), Principals: []tenant.PrincipalMatch{{CommonName: svcB}},
-			Servers: []tenant.Server{serverFor(tB, "srv-1", h.sb), serverFor(tB, "only-b", h.sb)},
+			ID: tB, Limits: tenanttest.Limits(), Principals: []tenant.PrincipalMatch{{CommonName: svcB}},
+			Servers: []tenant.Server{tenanttest.Server(tB, "srv-1", h.sb), tenanttest.Server(tB, "only-b", h.sb)},
 		},
 	}
 	for _, o := range opts {
 		o(h, h.tenants)
 	}
-	logPath := filepath.Join(leakcheck.PrivDir(t), "audit.jsonl")
-	l, err := audit.Open(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	h.au = &failAudit{l: l, path: logPath, fail: map[string]bool{}}
+	h.au = audittest.Open(t)
 	logger := slog.New(slog.NewJSONHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	h.e, err = jobs.New(t.Context(), jobs.Config{DataDir: leakcheck.PrivDir(t), Tenants: h.tenants, Audit: h.au, SSHOptions: testSSH})
+	var err error
+	h.e, err = jobs.New(t.Context(), jobs.Config{DataDir: leakcheck.PrivDir(t), Tenants: h.tenants, Audit: h.au, SSHOptions: tenanttest.SSHOptions})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +129,7 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	h.guard = guard
 	h.gw, err = New(Config{
 		Version: "test", Tenants: h.tenants, Policy: countingDecider{pe, &h.decisions}, Jobs: h.e, Audit: h.au, Guard: guard,
-		Health: ca, SSHOptions: testSSH, Logger: logger, MaxInFlight: h.inFlight,
+		Health: ca, SSHOptions: tenanttest.SSHOptions, Logger: logger, MaxInFlight: h.inFlight,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -269,7 +151,7 @@ func (c countingDecider) Decide(p tenant.Principal, srv *tenant.Server, tool pol
 
 // newHarnessTenants returns the harness's two tenants without servers.
 func newHarnessTenants() []tenant.Tenant {
-	return []tenant.Tenant{{ID: tA, Limits: testLimits()}, {ID: tB, Limits: testLimits()}}
+	return []tenant.Tenant{{ID: tA, Limits: tenanttest.Limits()}, {ID: tB, Limits: tenanttest.Limits()}}
 }
 
 // waitReady waits until the authenticator has loaded the issuer's keys.
@@ -304,12 +186,7 @@ func serve(t *testing.T, srv *http.Server) string {
 
 // tokenFor mints a valid token for who: userA is a user, anything else a
 // service token.
-func (h *harness) tokenFor(who string) string {
-	if strings.Contains(who, "@") {
-		return h.is.User(who).Sign()
-	}
-	return h.is.Service(who).Sign()
-}
+func (h *harness) tokenFor(who string) string { return h.is.For(who).Sign() }
 
 // tokenTransport sets the token header on every request.
 type tokenTransport struct {
@@ -550,10 +427,10 @@ func (h *harness) run(t *testing.T, who, server, command string, extra map[strin
 }
 
 // events returns the names of the audit events that match.
-func (h *harness) events(t *testing.T, match func(auditLine) bool) []string {
+func (h *harness) events(t *testing.T, match func(audittest.Line) bool) []string {
 	t.Helper()
 	var out []string
-	for _, l := range h.au.lines(t) {
+	for _, l := range h.au.Lines(t) {
 		if match(l) {
 			out = append(out, l.Event)
 		}

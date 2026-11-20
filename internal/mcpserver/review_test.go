@@ -20,6 +20,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/jobs"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
 
@@ -82,7 +83,7 @@ func batchBody(n int) []byte {
 func TestBatchRefused(t *testing.T) {
 	h := newHarness(t)
 	called := func() int {
-		return len(h.events(t, func(l auditLine) bool { return l.Event == audit.EventToolCalled }))
+		return len(h.events(t, func(l audittest.Line) bool { return l.Event == audit.EventToolCalled }))
 	}
 	for _, tc := range []struct {
 		name, version string
@@ -146,7 +147,7 @@ func TestOneCallPerServer(t *testing.T) {
 	if e := wantErr(t, second, CodeInvalidArgument, ""); e.Message != msgOneCall {
 		t.Fatalf("message = %q", e.Message)
 	}
-	got := h.events(t, func(l auditLine) bool { return l.RequestID == "rid-one" })
+	got := h.events(t, func(l audittest.Line) bool { return l.RequestID == "rid-one" })
 	if strings.Join(got, ",") != "tool.called,tool.called,tool.failed" {
 		t.Fatalf("events = %v", got)
 	}
@@ -179,10 +180,10 @@ func TestClientGoneLegacyProtocol(t *testing.T) {
 	if time.Since(start) > 6*time.Second {
 		t.Fatalf("the slot was freed after %v, near the full wait", time.Since(start))
 	}
-	var closed []auditLine
+	var closed []audittest.Line
 	if !leakcheck.Poll(5*time.Second, func() bool {
 		closed = nil
-		for _, l := range h.au.lines(t) {
+		for _, l := range h.au.Lines(t) {
 			if l.Event == audit.EventToolFailed && l.Tool == ToolRunCommand {
 				closed = append(closed, l)
 			}
@@ -313,7 +314,7 @@ func TestAuditArgumentsBounded(t *testing.T) {
 	} {
 		h.call(t, userA, c.tool, c.args)
 	}
-	b, err := os.ReadFile(h.au.path)
+	b, err := os.ReadFile(h.au.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +327,7 @@ func TestAuditArgumentsBounded(t *testing.T) {
 		}
 	}
 	var invalid, cut int
-	for _, l := range h.au.lines(t) {
+	for _, l := range h.au.Lines(t) {
 		if l.Event != audit.EventToolCalled {
 			continue
 		}

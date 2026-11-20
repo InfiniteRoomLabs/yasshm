@@ -2,7 +2,6 @@ package auth
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -18,6 +17,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/accesstest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/syncbuf"
 )
 
 // The synthetic principals of the test tenant.
@@ -65,25 +65,7 @@ type fixture struct {
 	is   *accesstest.Issuer
 	clk  *clock
 	a    *CloudflareAccess
-	logs *syncBuffer
-}
-
-// syncBuffer is a goroutine-safe log sink.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
+	logs *syncbuf.Buffer
 }
 
 // newFixture builds an authenticator for a fresh issuer. It does not
@@ -94,7 +76,7 @@ func newFixture(t *testing.T, opts ...Option) *fixture {
 	is := accesstest.New(t, clk.Now)
 	tr := &http.Transport{}
 	t.Cleanup(tr.CloseIdleConnections)
-	logs := &syncBuffer{}
+	logs := &syncbuf.Buffer{}
 	all := append([]Option{
 		WithClock(clk.Now),
 		WithHTTPClient(&http.Client{Transport: tr}),

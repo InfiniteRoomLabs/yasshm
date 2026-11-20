@@ -11,6 +11,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/policy"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 )
 
 // hints are the annotations each tool must carry: read-only only where the
@@ -102,7 +103,7 @@ func TestPanicRecovered(t *testing.T) {
 	if strings.Contains(e.Message, "secret") || strings.Contains(h.logs.String(), "secret panic text") {
 		t.Fatal("the panic text escaped")
 	}
-	got := h.events(t, func(l auditLine) bool { return l.RequestID == "rid-panic" })
+	got := h.events(t, func(l audittest.Line) bool { return l.RequestID == "rid-panic" })
 	if strings.Join(got, ",") != "tool.called,tool.failed" {
 		t.Fatalf("events = %v", got)
 	}

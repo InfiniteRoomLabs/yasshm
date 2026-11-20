@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -24,27 +23,10 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/syncbuf"
 )
 
 const operator = "operator@example.net"
-
-// syncBuffer is a writer safe for concurrent use.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
-}
 
 // serveFixture is a config for serve against an sshtest target and the
 // local issuer, with a private data directory and audit log.
@@ -105,7 +87,7 @@ tenants:
 
 // running is a Serve call in progress.
 type running struct {
-	stderr *syncBuffer
+	stderr *syncbuf.Buffer
 	done   chan int
 	cancel context.CancelFunc
 }
@@ -113,7 +95,7 @@ type running struct {
 func startServe(t *testing.T, args ...string) *running {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &running{stderr: &syncBuffer{}, done: make(chan int, 1), cancel: cancel}
+	r := &running{stderr: &syncbuf.Buffer{}, done: make(chan int, 1), cancel: cancel}
 	go func() { r.done <- Serve(ctx, args, io.Discard, r.stderr) }()
 	t.Cleanup(func() {
 		cancel()
@@ -427,7 +409,7 @@ func TestServeInterruptedStart(t *testing.T) {
 	f := newServeFixture(t, "127.0.0.1:0")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	var errb syncBuffer
+	var errb syncbuf.Buffer
 	if code := Serve(ctx, []string{"--config", f.config}, io.Discard, &errb); code != exitOK {
 		t.Fatalf("exit = %d:\n%s", code, errb.String())
 	}

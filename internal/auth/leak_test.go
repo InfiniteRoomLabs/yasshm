@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/accesstest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/syncbuf"
 )
 
 // TestNothingLeaks sends every token class through the middleware, then
@@ -22,7 +23,7 @@ func TestNothingLeaks(t *testing.T) {
 	f := newFixture(t)
 	f.load(t)
 	log, path := auditLog(t)
-	mwLogs := &syncBuffer{}
+	mwLogs := &syncbuf.Buffer{}
 	srv := Middleware(f.a, log, WithMiddlewareLogger(slog.New(slog.NewJSONHandler(mwLogs, nil))))(Require(&okHandler{}))
 	var captured strings.Builder
 	var secrets []string

@@ -61,6 +61,15 @@ func (is *Issuer) Service(cn string) *Builder {
 	return b
 }
 
+// For returns a builder for a valid token for who: an address with "@" is a
+// user (User), anything else a service token's client id (Service).
+func (is *Issuer) For(who string) *Builder {
+	if strings.Contains(who, "@") {
+		return is.User(who)
+	}
+	return is.Service(who)
+}
+
 func (is *Issuer) base() *Builder {
 	k := is.SigningKey()
 	now := is.now().Unix()

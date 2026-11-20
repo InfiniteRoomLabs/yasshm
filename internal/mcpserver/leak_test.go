@@ -16,6 +16,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/accesstest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/tenanttest"
 )
 
 // capture records every response the client gets, headers and body.
@@ -64,10 +65,10 @@ func TestNothingFromTheConfigLeaks(t *testing.T) {
 	var su *sshtest.Server
 	h := newHarness(t, withFull("full-1"), withTenants(func(ts []tenant.Tenant) {
 		su = sshtest.Start(t, sshtest.Options{User: markUser})
-		u := serverFor(tA, "srv-u", su)
-		ghost := serverFor(tA, "ghost", su)
+		u := tenanttest.Server(tA, "srv-u", su)
+		ghost := tenanttest.Server(tA, "ghost", su)
 		ghost.Host, ghost.Identity.PrivateKeyFile = markHost, markKey
-		ghostKH := serverFor(tA, "ghost-kh", su)
+		ghostKH := tenanttest.Server(tA, "ghost-kh", su)
 		ghostKH.Host, ghostKH.HostKey, ghostKH.KnownHostsFile = markHost, "", markKnown
 		ts[0].Servers = append(ts[0].Servers, u, ghost, ghostKH)
 		for i := range ts {
@@ -79,7 +80,7 @@ func TestNothingFromTheConfigLeaks(t *testing.T) {
 	markers := []string{
 		markHost, markUser, markKey, markKnown, markIdentity,
 		accesstest.TeamDomain, accesstest.Audience, string(tB),
-		h.sa.ClientKeyFile, h.sb.ClientKeyFile, su.ClientKeyFile, h.au.path,
+		h.sa.ClientKeyFile, h.sb.ClientKeyFile, su.ClientKeyFile, h.au.Path,
 		h.sa.Host + ":" + strconv.Itoa(h.sa.Port), h.sb.Host + ":" + strconv.Itoa(h.sb.Port), su.Host + ":" + strconv.Itoa(su.Port),
 	}
 

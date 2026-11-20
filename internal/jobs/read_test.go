@@ -291,7 +291,7 @@ func TestTenantIsolation(t *testing.T) {
 		if err != nil || len(p.Records) != 1 || p.Records[0].ID != rb.ID {
 			t.Errorf("list %v %+v", err, p)
 		}
-		if strings.Contains(h.au.names(t, ra.ID)[len(h.au.names(t, ra.ID))-1], "kill") {
+		if strings.Contains(h.names(t, ra.ID)[len(h.names(t, ra.ID))-1], "kill") {
 			t.Error("a kill was audited for the other tenant's command")
 		}
 		if g, _ := h.e.Get(ctx, tA, ra.ID); g.Status != StatusRunning {
@@ -347,7 +347,7 @@ func TestKillAudit(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		r := h.start("sleep 30", StartOptions{})
-		h.au.setFail(audit.EventCommandKillRequested, true)
+		h.au.SetFail(audit.EventCommandKillRequested, true)
 		_, delivered, err := h.e.Kill(t.Context(), tA, h.actorA, r.ID, SignalKill)
 		if !errors.Is(err, ErrAuditFailed) || delivered {
 			t.Fatalf("%v %v", delivered, err)
@@ -364,8 +364,8 @@ func TestKillAudit(t *testing.T) {
 	t.Run("sad/failed after-the-fact events go to the error hook and hide nothing", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
-		h.au.setFail(audit.EventCommandStarted, true)
-		h.au.setFail(audit.EventCommandFinished, true)
+		h.au.SetFail(audit.EventCommandStarted, true)
+		h.au.SetFail(audit.EventCommandFinished, true)
 		r := h.wait(h.start("echo ok", StartOptions{}).ID)
 		if r.Status != StatusSucceeded {
 			t.Fatalf("%+v", r)

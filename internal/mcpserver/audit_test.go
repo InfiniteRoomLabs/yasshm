@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 )
 
 // TestAuditBeforeAct: for every tool, a tool.called event that cannot be
@@ -21,7 +22,7 @@ func TestAuditBeforeAct(t *testing.T) {
 	}
 	running := h.run(t, userA, "srv-1", "sleep 30", map[string]any{"wait_seconds": 0})
 	t.Cleanup(func() {
-		h.au.setFail(audit.EventToolCalled, false)
+		h.au.SetFail(audit.EventToolCalled, false)
 		decode(t, h.call(t, userA, ToolKillCommand, map[string]any{"command_id": running.CommandID, "signal": "KILL"}), &KillResult{})
 	})
 	sftpOpens := func() int {
@@ -34,7 +35,7 @@ func TestAuditBeforeAct(t *testing.T) {
 		return n
 	}
 	countEvents := func(name string) int {
-		return len(h.events(t, func(l auditLine) bool { return l.Event == name }))
+		return len(h.events(t, func(l audittest.Line) bool { return l.Event == name }))
 	}
 
 	calls := map[string]map[string]any{
@@ -48,8 +49,8 @@ func TestAuditBeforeAct(t *testing.T) {
 		ToolUploadFile:    {"server": "full-1", "path": filepath.Join(h.sa.Root, "up"), "content": "x"},
 	}
 	t.Run("sad/tool.called fails: no tool acts", func(t *testing.T) {
-		h.au.setFail(audit.EventToolCalled, true)
-		defer h.au.setFail(audit.EventToolCalled, false)
+		h.au.SetFail(audit.EventToolCalled, true)
+		defer h.au.SetFail(audit.EventToolCalled, false)
 		before := h.sa.Accepted()
 		for name, args := range calls {
 			e := wantErr(t, h.call(t, userA, name, args), CodeInternal, "")
@@ -68,8 +69,8 @@ func TestAuditBeforeAct(t *testing.T) {
 		}
 	})
 	t.Run("sad/command.requested fails: run_command starts nothing", func(t *testing.T) {
-		h.au.setFail(audit.EventCommandRequested, true)
-		defer h.au.setFail(audit.EventCommandRequested, false)
+		h.au.SetFail(audit.EventCommandRequested, true)
+		defer h.au.SetFail(audit.EventCommandRequested, false)
 		started := countEvents(audit.EventCommandStarted)
 		e := wantErr(t, h.call(t, userA, ToolRunCommand, calls[ToolRunCommand]), CodeInternal, "")
 		if e.Message != msgAudit || countEvents(audit.EventCommandStarted) != started {
@@ -80,8 +81,8 @@ func TestAuditBeforeAct(t *testing.T) {
 		}
 	})
 	t.Run("sad/command.kill_requested fails: nothing is signalled", func(t *testing.T) {
-		h.au.setFail(audit.EventCommandKillRequested, true)
-		defer h.au.setFail(audit.EventCommandKillRequested, false)
+		h.au.SetFail(audit.EventCommandKillRequested, true)
+		defer h.au.SetFail(audit.EventCommandKillRequested, false)
 		wantErr(t, h.call(t, userA, ToolKillCommand, calls[ToolKillCommand]), CodeInternal, "")
 		var r ReadResult
 		decode(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": running.CommandID}), &r)
@@ -90,8 +91,8 @@ func TestAuditBeforeAct(t *testing.T) {
 		}
 	})
 	t.Run("sad/file.downloaded fails: nothing is read", func(t *testing.T) {
-		h.au.setFail(audit.EventFileDownloaded, true)
-		defer h.au.setFail(audit.EventFileDownloaded, false)
+		h.au.SetFail(audit.EventFileDownloaded, true)
+		defer h.au.SetFail(audit.EventFileDownloaded, false)
 		before := sftpOpens()
 		wantErr(t, h.call(t, userA, ToolDownloadFile, calls[ToolDownloadFile]), CodeInternal, "")
 		if sftpOpens() != before {
@@ -99,8 +100,8 @@ func TestAuditBeforeAct(t *testing.T) {
 		}
 	})
 	t.Run("sad/file.uploaded fails: nothing is written", func(t *testing.T) {
-		h.au.setFail(audit.EventFileUploaded, true)
-		defer h.au.setFail(audit.EventFileUploaded, false)
+		h.au.SetFail(audit.EventFileUploaded, true)
+		defer h.au.SetFail(audit.EventFileUploaded, false)
 		before := sftpOpens()
 		wantErr(t, h.call(t, userA, ToolUploadFile, calls[ToolUploadFile]), CodeInternal, "")
 		if _, err := os.Stat(filepath.Join(h.sa.Root, "up")); err == nil || sftpOpens() != before {
@@ -108,8 +109,8 @@ func TestAuditBeforeAct(t *testing.T) {
 		}
 	})
 	t.Run("sad/policy.denied fails: still refused, as internal", func(t *testing.T) {
-		h.au.setFail(audit.EventPolicyDenied, true)
-		defer h.au.setFail(audit.EventPolicyDenied, false)
+		h.au.SetFail(audit.EventPolicyDenied, true)
+		defer h.au.SetFail(audit.EventPolicyDenied, false)
 		e := wantErr(t, h.call(t, userA, ToolRunCommand, map[string]any{"server": "srv-1", "command": "sudo id"}), CodeInternal, "")
 		if e.Message != msgAudit {
 			t.Fatalf("message = %q", e.Message)
@@ -120,7 +121,7 @@ func TestAuditBeforeAct(t *testing.T) {
 		h.call(t, userA, ToolListCommands, nil)
 		h.call(t, userA, ToolReadOutput, calls[ToolReadOutput])
 		h.call(t, userA, ToolGetServerInfo, calls[ToolGetServerInfo])
-		lines := h.au.lines(t)
+		lines := h.au.Lines(t)
 		accepted := map[string]bool{}
 		for _, l := range lines {
 			if l.Event == audit.EventAuthAccepted {
@@ -143,7 +144,7 @@ func TestAuditBeforeAct(t *testing.T) {
 		}
 	})
 	t.Run("happy/arguments are audited, file content is not", func(t *testing.T) {
-		for _, l := range h.au.lines(t) {
+		for _, l := range h.au.Lines(t) {
 			if l.Event == audit.EventToolCalled && l.Tool == ToolUploadFile && !strings.Contains(string(l.Args), `"content_bytes":1`) {
 				t.Fatalf("upload args = %s", l.Args)
 			}
@@ -159,7 +160,7 @@ func TestAuditBeforeAct(t *testing.T) {
 func TestBrokenAuditLog(t *testing.T) {
 	h := newHarness(t)
 	h.session(userA) // connect while the log works
-	if err := h.au.l.Close(); err != nil {
+	if err := h.au.Close(); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{ToolRunCommand, ToolDownloadFile, ToolKillCommand, ToolGetServerInfo} {
@@ -178,15 +179,15 @@ func TestBrokenAuditLog(t *testing.T) {
 func TestToolFailedEvent(t *testing.T) {
 	h := newHarness(t)
 	wantErr(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": "x"}), CodeInvalidArgument, "")
-	got := h.events(t, func(l auditLine) bool {
+	got := h.events(t, func(l audittest.Line) bool {
 		return l.Event == audit.EventToolFailed && l.Tool == ToolReadOutput && l.Code == CodeInvalidArgument
 	})
 	if len(got) != 1 {
 		t.Fatalf("tool.failed events = %v", got)
 	}
-	denied := h.events(t, func(l auditLine) bool { return l.Event == audit.EventToolFailed && l.Code == CodePolicyDenied })
+	denied := h.events(t, func(l audittest.Line) bool { return l.Event == audit.EventToolFailed && l.Code == CodePolicyDenied })
 	wantErr(t, h.call(t, userA, ToolRunCommand, map[string]any{"server": "srv-1", "command": "sudo id"}), CodePolicyDenied, "sudo")
-	if again := h.events(t, func(l auditLine) bool { return l.Event == audit.EventToolFailed && l.Code == CodePolicyDenied }); !slices.Equal(denied, again) {
+	if again := h.events(t, func(l audittest.Line) bool { return l.Event == audit.EventToolFailed && l.Code == CodePolicyDenied }); !slices.Equal(denied, again) {
 		t.Fatal("a denial was also written as tool.failed")
 	}
 }

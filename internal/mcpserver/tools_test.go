@@ -13,16 +13,18 @@ import (
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/tenanttest"
 )
 
 // withServer adds a server of tenant A on an sshtest server with opts.
 func withServer(t *testing.T, id tenant.ServerID, opts sshtest.Options) hopt {
 	return func(_ *harness, ts []tenant.Tenant) {
 		s := sshtest.Start(t, opts)
-		ts[0].Servers = append(ts[0].Servers, serverFor(tA, id, s))
+		ts[0].Servers = append(ts[0].Servers, tenanttest.Server(tA, id, s))
 	}
 }
 
@@ -30,7 +32,7 @@ func withServer(t *testing.T, id tenant.ServerID, opts sshtest.Options) hopt {
 // connection.
 func withRefusing(t *testing.T, id tenant.ServerID) hopt {
 	return func(h *harness, ts []tenant.Tenant) {
-		s := serverFor(tA, id, h.sa)
+		s := tenanttest.Server(tA, id, h.sa)
 		s.Port = loopback.RefusingPort(t)
 		ts[0].Servers = append(ts[0].Servers, s)
 	}
@@ -39,7 +41,7 @@ func withRefusing(t *testing.T, id tenant.ServerID) hopt {
 // withFull adds a server of tenant A that grants full (no config can).
 func withFull(id tenant.ServerID) hopt {
 	return func(h *harness, ts []tenant.Tenant) {
-		s := serverFor(tA, id, h.sa)
+		s := tenanttest.Server(tA, id, h.sa)
 		s.Access = tenant.AccessFull
 		ts[0].Servers = append(ts[0].Servers, s)
 	}
@@ -63,7 +65,7 @@ func (h *harness) waitDone(t *testing.T, who, id string) ReadResult {
 func (h *harness) stages(t *testing.T, event, path string) []string {
 	t.Helper()
 	var out []string
-	for _, l := range h.au.lines(t) {
+	for _, l := range h.au.Lines(t) {
 		if l.Event == event && l.Path == path {
 			out = append(out, l.Stage)
 		}
@@ -334,7 +336,7 @@ func TestRunCommandClientGone(t *testing.T) {
 	if rr.Data != "survived\n" {
 		t.Fatalf("output = %q", rr.Data)
 	}
-	got := h.events(t, func(l auditLine) bool {
+	got := h.events(t, func(l audittest.Line) bool {
 		return l.Event == audit.EventToolFailed && l.Tool == ToolRunCommand && l.Code == codeClientClosed
 	})
 	if len(got) != 1 || strings.Contains(h.logs.String(), `"msg":"tool failed"`) {

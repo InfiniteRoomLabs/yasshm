@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -110,12 +109,7 @@ func (e *Edge) token() string {
 	if mode == ModeNoToken {
 		return ""
 	}
-	var tok string
-	if strings.Contains(who, "@") {
-		tok = e.is.User(who).Sign()
-	} else {
-		tok = e.is.Service(who).Sign()
-	}
+	tok := e.is.For(who).Sign()
 	if mode == ModeBadToken {
 		tok = accesstest.TamperSignature(tok)
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/auth"
 	"github.com/InfiniteRoomLabs/yasshm/internal/jobs"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/edgetest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
@@ -214,13 +215,13 @@ func TestHTTPSurface(t *testing.T) {
 			t.Fatalf("status = %d", r.code)
 		}
 		var ids []string
-		for _, l := range h.au.lines(t) {
+		for _, l := range h.au.Lines(t) {
 			if l.Event == audit.EventCommandFinished {
 				ids = append(ids, l.RequestID)
 			}
 		}
 		rid := ids[len(ids)-1]
-		got := h.events(t, func(l auditLine) bool { return l.RequestID == rid })
+		got := h.events(t, func(l audittest.Line) bool { return l.RequestID == rid })
 		want := []string{audit.EventAuthAccepted, audit.EventToolCalled, audit.EventCommandRequested, audit.EventCommandStarted, audit.EventCommandFinished}
 		if !slices.Equal(got, want) || len(rid) != 32 {
 			t.Fatalf("events of %s = %v", rid, got)
@@ -312,7 +313,7 @@ func TestRequestCap(t *testing.T) {
 		t.Fatal("the first request never took the slot")
 	}
 	authEvents := func() int {
-		return len(h.events(t, func(l auditLine) bool { return strings.HasPrefix(l.Event, "auth.") }))
+		return len(h.events(t, func(l audittest.Line) bool { return strings.HasPrefix(l.Event, "auth.") }))
 	}
 	audited := authEvents()
 	r := do(t, http.MethodPost, h.url+PathMCP, []byte(`{}`), h.mcpHeaders(userA))

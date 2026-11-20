@@ -1,10 +1,7 @@
 package jobs
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,113 +10,18 @@ import (
 	"time"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
-	"github.com/InfiniteRoomLabs/yasshm/internal/sshclient"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/tenanttest"
 )
 
 const (
 	tA tenant.TenantID = "tenant-a"
 	tB tenant.TenantID = "tenant-b"
 )
-
-func testLimits() tenant.Limits {
-	return tenant.Limits{
-		DefaultWaitSeconds: 5, MaxWaitSeconds: 10, DefaultTimeoutSeconds: 30, MaxTimeoutSeconds: 60,
-		MaxConcurrentCommands: 4, MaxConcurrentPerServer: 2, MaxCommandBytes: 8192, MaxOutputBytes: 1 << 20,
-		MaxResultBytes: 100000, RetentionDays: 7, MaxDataBytes: 1 << 30, MaxUploadBytes: 1 << 20,
-		KillGraceSeconds: 1, ConnectTimeoutSeconds: 5, ShutdownGraceSeconds: 10,
-	}
-}
-
-// testSSH has short timings so the suite stays fast.
-func testSSH(tenant.Limits) sshclient.Options {
-	return sshclient.Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: time.Second}
-}
-
-// serverFor describes an sshtest server as a server of tid.
-func serverFor(tid tenant.TenantID, sid tenant.ServerID, s *sshtest.Server) tenant.Server {
-	return tenant.Server{
-		Tenant: tid, ID: sid, Host: s.Host, Port: s.Port, Access: tenant.AccessLook, HostKey: s.HostKeyLine(),
-		Identity: tenant.Identity{ID: "look", User: s.User, PrivateKeyFile: s.ClientKeyFile},
-	}
-}
-
-// failAudit is the real audit logger with switches that make a named event
-// fail.
-type failAudit struct {
-	l    *audit.Logger
-	path string
-	mu   sync.Mutex
-	fail map[string]bool
-}
-
-func (a *failAudit) setFail(name string, on bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.fail[name] = on
-}
-
-func (a *failAudit) Write(ev audit.Event) error {
-	a.mu.Lock()
-	f := a.fail[ev.Name()]
-	a.mu.Unlock()
-	if f {
-		return errors.New("audit write failed (test)")
-	}
-	return a.l.Write(ev)
-}
-
-func (a *failAudit) Before(ev audit.Event, act func() error) error {
-	if err := a.Write(ev); err != nil {
-		return err
-	}
-	return act()
-}
-
-// auditLine is the part of an audit line the tests read.
-type auditLine struct {
-	Event     string `json:"event"`
-	Tenant    string `json:"tenant"`
-	CommandID string `json:"command_id"`
-	Status    string `json:"status"`
-	ErrorCode string `json:"error_code"`
-	Signal    string `json:"signal"`
-	Command   string `json:"command"`
-}
-
-// events returns the audit events of command id, in order.
-func (a *failAudit) events(t *testing.T, id tenant.CommandID) []auditLine {
-	t.Helper()
-	f, err := os.Open(a.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-	var out []auditLine
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var l auditLine
-		if err := json.Unmarshal(sc.Bytes(), &l); err != nil {
-			t.Fatal(err)
-		}
-		if l.CommandID == string(id) {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
-func (a *failAudit) names(t *testing.T, id tenant.CommandID) []string {
-	t.Helper()
-	var out []string
-	for _, l := range a.events(t, id) {
-		out = append(out, l.Event)
-	}
-	return out
-}
 
 // harness is an engine with two tenants: tenant-a has srv-1 and srv-2 on
 // one sshtest server, tenant-b has srv-1 on another.
@@ -129,7 +31,7 @@ type harness struct {
 	e       *Engine
 	cfg     Config
 	sa, sb  *sshtest.Server
-	au      *failAudit
+	au      *audittest.FailLog
 	errsMu  sync.Mutex
 	errs    []error
 	actorA  audit.Actor
@@ -152,7 +54,7 @@ func withServer(o sshtest.Options) opt {
 	return func(h *harness, cfg *Config) {
 		h.sa = sshtest.Start(h.t, o)
 		for i := range cfg.Tenants[0].Servers {
-			srv := serverFor(tA, cfg.Tenants[0].Servers[i].ID, h.sa)
+			srv := tenanttest.Server(tA, cfg.Tenants[0].Servers[i].ID, h.sa)
 			cfg.Tenants[0].Servers[i] = srv
 		}
 	}
@@ -185,24 +87,18 @@ func newHarness(t *testing.T, opts ...opt) *harness {
 	h := &harness{t: t, dir: leakcheck.PrivDir(t)}
 	h.sa = sshtest.Start(t, sshtest.Options{})
 	h.sb = sshtest.Start(t, sshtest.Options{})
-	logPath := filepath.Join(leakcheck.PrivDir(t), "audit.jsonl")
-	l, err := audit.Open(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-	h.au = &failAudit{l: l, path: logPath, fail: map[string]bool{}}
+	h.au = audittest.Open(t)
 	h.actorA = audit.Actor{RequestID: "req-a", Principal: tenant.Principal{Tenant: tA, Kind: tenant.KindUser, Subject: "a@example.net"}}
 	h.actorB = audit.Actor{RequestID: "req-b", Principal: tenant.Principal{Tenant: tB, Kind: tenant.KindService, Subject: "svc-b"}}
 	h.cfg = Config{
 		DataDir: h.dir,
 		Tenants: []tenant.Tenant{
-			{ID: tA, Limits: testLimits(), Servers: []tenant.Server{serverFor(tA, "srv-1", h.sa), serverFor(tA, "srv-2", h.sa)}},
-			{ID: tB, Limits: testLimits(), Servers: []tenant.Server{serverFor(tB, "srv-1", h.sb)}},
+			{ID: tA, Limits: tenanttest.Limits(), Servers: []tenant.Server{tenanttest.Server(tA, "srv-1", h.sa), tenanttest.Server(tA, "srv-2", h.sa)}},
+			{ID: tB, Limits: tenanttest.Limits(), Servers: []tenant.Server{tenanttest.Server(tB, "srv-1", h.sb)}},
 		},
 		Audit:      h.au,
 		OnError:    func(err error) { h.errsMu.Lock(); h.errs = append(h.errs, err); h.errsMu.Unlock() },
-		SSHOptions: testSSH,
+		SSHOptions: tenanttest.SSHOptions,
 		Now: func() time.Time {
 			h.clockMu.Lock()
 			defer h.clockMu.Unlock()
@@ -217,6 +113,28 @@ func newHarness(t *testing.T, opts ...opt) *harness {
 	}
 	h.e = h.open()
 	return h
+}
+
+// events returns the audit events of command id, in order.
+func (h *harness) events(t *testing.T, id tenant.CommandID) []audittest.Line {
+	t.Helper()
+	var out []audittest.Line
+	for _, l := range h.au.Lines(t) {
+		if l.CommandID == string(id) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// names returns the names of the audit events of command id, in order.
+func (h *harness) names(t *testing.T, id tenant.CommandID) []string {
+	t.Helper()
+	var out []string
+	for _, l := range h.events(t, id) {
+		out = append(out, l.Event)
+	}
+	return out
 }
 
 // open starts an engine on the harness's data directory and shuts it down

@@ -17,6 +17,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/sshclient"
 	"github.com/InfiniteRoomLabs/yasshm/internal/store"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/audittest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
@@ -39,10 +40,10 @@ func TestStatuses(t *testing.T) {
 		if !strings.Contains(out, "hello\n") || !strings.Contains(out, "oops\n") || len(out) != 11 {
 			t.Fatalf("stdout %q", out)
 		}
-		if got := h.au.names(t, r.ID); !slices.Equal(got, []string{audit.EventCommandRequested, audit.EventCommandStarted, audit.EventCommandFinished}) {
+		if got := h.names(t, r.ID); !slices.Equal(got, []string{audit.EventCommandRequested, audit.EventCommandStarted, audit.EventCommandFinished}) {
 			t.Fatalf("events %v", got)
 		}
-		ev := h.au.events(t, r.ID)
+		ev := h.events(t, r.ID)
 		if ev[0].Command != "echo hello; echo oops >&2" || ev[2].Status != "succeeded" || ev[0].Tenant != string(tA) {
 			t.Fatalf("events %+v", ev)
 		}
@@ -73,7 +74,7 @@ func TestStatuses(t *testing.T) {
 		if r.Status != StatusFailed || r.Signal != "USR1" || r.ExitCode != nil {
 			t.Fatalf("%+v", r)
 		}
-		if ev := h.au.events(t, r.ID); ev[len(ev)-1].Signal != "USR1" {
+		if ev := h.events(t, r.ID); ev[len(ev)-1].Signal != "USR1" {
 			t.Fatalf("%+v", ev)
 		}
 	})
@@ -114,14 +115,14 @@ func TestStatuses(t *testing.T) {
 		if r.Status != StatusKilled || r.Signal != "TERM" || r.MayStillRun || r.KillRequestedAt.IsZero() {
 			t.Fatalf("%+v", r)
 		}
-		if got := h.au.names(t, r.ID); !slices.Equal(got, []string{audit.EventCommandRequested, audit.EventCommandStarted, audit.EventCommandKillRequested, audit.EventCommandFinished}) {
+		if got := h.names(t, r.ID); !slices.Equal(got, []string{audit.EventCommandRequested, audit.EventCommandStarted, audit.EventCommandKillRequested, audit.EventCommandFinished}) {
 			t.Fatalf("events %v", got)
 		}
 		again, delivered, err := h.e.Kill(t.Context(), tA, h.actorA, r.ID, SignalKill)
 		if err != nil || delivered || again.Status != StatusKilled {
 			t.Fatalf("second kill: %v %v %+v", delivered, err, again)
 		}
-		if n := len(h.au.names(t, r.ID)); n != 4 {
+		if n := len(h.names(t, r.ID)); n != 4 {
 			t.Fatalf("a kill of a finished command was audited: %d events", n)
 		}
 	})
@@ -153,7 +154,7 @@ func TestStatuses(t *testing.T) {
 		if r.Status != StatusError || r.ErrorCode != string(sshclient.CodeUnreachable) || !r.MayStillRun {
 			t.Fatalf("%+v", r)
 		}
-		if ev := h.au.events(t, r.ID); ev[len(ev)-1].ErrorCode != "ssh_unreachable" {
+		if ev := h.events(t, r.ID); ev[len(ev)-1].ErrorCode != "ssh_unreachable" {
 			t.Fatalf("%+v", ev)
 		}
 	})
@@ -180,7 +181,7 @@ func TestStartFailures(t *testing.T) {
 			if strings.Contains(err.Error(), "127.0.0.1") || strings.Contains(err.Error(), h.sa.ClientKeyFile) {
 				t.Fatalf("the error names the host or key: %v", err)
 			}
-			if got := h.au.names(t, r.ID); !slices.Equal(got, []string{audit.EventCommandRequested, audit.EventCommandFinished}) {
+			if got := h.names(t, r.ID); !slices.Equal(got, []string{audit.EventCommandRequested, audit.EventCommandFinished}) {
 				t.Fatalf("events %v", got)
 			}
 			h.noSlots(h.e)
@@ -201,7 +202,7 @@ func TestStartFailures(t *testing.T) {
 	t.Run("sad/a failed command.requested write: error record, nothing sent, slot freed", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
-		h.au.setFail(audit.EventCommandRequested, true)
+		h.au.SetFail(audit.EventCommandRequested, true)
 		r, err := h.e.Start(t.Context(), tA, h.actorA, "srv-1", "echo x", StartOptions{})
 		if !errors.Is(err, ErrAuditFailed) || CodeOf(err) != CodeInternal || r.ID != "" {
 			t.Fatalf("%v %+v", err, r)
@@ -395,7 +396,7 @@ func TestRecover(t *testing.T) {
 		if err != nil || string(o.Data) != "partial\n" || !o.EOF {
 			t.Fatalf("%v %+v", err, o)
 		}
-		ev := h.au.events(t, r.ID)
+		ev := h.events(t, r.ID)
 		if last := ev[len(ev)-1]; last.Event != audit.EventCommandFinished || last.Status != "lost" {
 			t.Fatalf("%+v", ev)
 		}
@@ -520,7 +521,7 @@ func TestShutdown(t *testing.T) {
 func TestNew(t *testing.T) {
 	t.Parallel()
 	base := func(t *testing.T) Config {
-		return Config{DataDir: leakcheck.PrivDir(t), Audit: &failAudit{fail: map[string]bool{}}}
+		return Config{DataDir: leakcheck.PrivDir(t), Audit: audittest.Detached()}
 	}
 	t.Run("sad/bad configurations are refused", func(t *testing.T) {
 		t.Parallel()

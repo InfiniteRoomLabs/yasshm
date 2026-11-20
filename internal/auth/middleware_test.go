@@ -13,6 +13,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/accesstest"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/syncbuf"
 )
 
 // brokenLog refuses every write.
@@ -29,7 +30,7 @@ type fixedAuth struct {
 func (f fixedAuth) Authenticate(*http.Request) (tenant.Principal, error) { return f.p, f.err }
 
 func TestMiddlewareAuditFailure(t *testing.T) {
-	logs := &syncBuffer{}
+	logs := &syncbuf.Buffer{}
 	opt := WithMiddlewareLogger(slog.New(slog.NewJSONHandler(logs, nil)))
 	t.Run("raging/an accepted request whose audit write fails is refused and next never runs", func(t *testing.T) {
 		h := &okHandler{}
@@ -232,7 +233,7 @@ func TestRejectionAllowance(t *testing.T) {
 		}
 	})
 	t.Run("sad/a summary write that fails is logged", func(t *testing.T) {
-		logs := &syncBuffer{}
+		logs := &syncbuf.Buffer{}
 		bg := NewGuard(fixedAuth{err: reject(ReasonMissingToken)}, &brokenLog{}, WithMiddlewareLogger(slog.New(slog.NewJSONHandler(logs, nil))))
 		for range RejectAllowance + 1 {
 			bg.Wrap(&okHandler{}).ServeHTTP(httptest.NewRecorder(), request(""))

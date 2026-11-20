@@ -216,7 +216,7 @@ func TestFinishOrdering(t *testing.T) {
 		h := newHarness(t, withLimits(func(l *tenant.Limits) { l.MaxConcurrentPerServer = 1; l.MaxConcurrentCommands = 1 }))
 		for range 30 {
 			r := h.wait(h.start("true", StartOptions{}).ID)
-			if n := h.au.names(t, r.ID); n[len(n)-1] != "command.finished" {
+			if n := h.names(t, r.ID); n[len(n)-1] != "command.finished" {
 				t.Fatalf("events %v", n)
 			}
 		}
