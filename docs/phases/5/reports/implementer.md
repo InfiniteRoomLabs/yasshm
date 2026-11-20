@@ -1,6 +1,6 @@
 # Phase 5 implementer report -- MCP endpoint and tools
 
-Phase base `cf21613`. Head at the time of writing: `1f68528` (CI green), plus this report's commit. Branch `claude/serene-franklin-jv4pu7`.
+Phase base `cf21613`. Branch `claude/serene-franklin-jv4pu7`. Code head `a842d66` (CI green), plus the report commits.
 
 ## Summary
 
@@ -100,7 +100,9 @@ build: dist/SHA256SUMS
 check.sh: all OK
 ```
 
-CI (`gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`): `1f68528` `check completed success`; also green on `9c06b3c`, `7094de2`, `8b004c0`.
+CI (`gh api repos/InfiniteRoomLabs/yasshm/commits/<sha>/check-runs`): `1f68528` `check completed success`; also green on `9c06b3c`, `7094de2`, `8b004c0`. **Red once** on the first report commit `9c6daff` (docs only): `internal/jobs` `TestConcurrency` failed with "9 started, 15 busy" (shuffle seed 1795150663091408065). Cause: the Phase 3 test started 24 commands of `sleep 0.2` against a limit of 8 and counted the starts; on a slow runner one command finished during the burst and freed a slot, so a ninth start was legitimate. Not reproduced locally (30 runs, and 20 on one CPU). Fixed in `a842d66` (`test(jobs): hold every command's slot until the burst is counted`): the commands wait for a release file the test writes after counting, so a ninth start can now only mean the engine over-admitted. `a842d66`: `check completed success`.
+
+Gate re-run at `a842d66`: every step passed (`cover: total 94.7%`, `No vulnerabilities found.`, both binaries built, model valid), and the final clean-tree check failed only because an untracked `docs/phases/5/reports/simplify.md` appeared while it ran -- a review lane's file, not this implementer's; it was left untouched.
 
 ## Dependency (D14)
 
@@ -144,12 +146,15 @@ The jump is the job engine, the store and `modernc.org/sqlite` linked into the b
 13. **`download_file` is text only when the bytes are valid UTF-8 without NUL**; a NUL would cost six bytes per byte as text.
 14. **A character split by the page end** is held for the next page unless it is all the page holds (then replaced, so a reader with `max_bytes` 1 still progresses).
 15. **Command text over `max_command_bytes`** is `policy_denied` (rule `command-too-long`) as the policy engine decides; arguments over 96 KiB (2 MiB for `upload_file`) are `invalid_argument` before policy.
-16. **Observed, not fixed (Phase 1 code)**: `policy.Decide` on a 64 KiB command takes about 270 ms without the race detector (about 6 s under `-race`), roughly linear; only an authenticated caller can send one and the default `max_command_bytes` is 8192. Worth a look in Phase 6 hardening.
-17. The README's smoke test can only reach `/healthz` and a 401 on `/mcp`: every tool needs a real Access token, which only the test kits mint.
+16. **Flaky Phase 3 test fixed** (`internal/jobs` `TestConcurrency`, see CI above).
+17. **Observed, not fixed (Phase 1 code)**: `policy.Decide` on a 64 KiB command takes about 270 ms without the race detector (about 6 s under `-race`), roughly linear; only an authenticated caller can send one and the default `max_command_bytes` is 8192. Worth a look in Phase 6 hardening.
+18. The README's smoke test can only reach `/healthz` and a 401 on `/mcp`: every tool needs a real Access token, which only the test kits mint.
 
-## `git log --oneline cf21613..HEAD` (before this report)
+## `git log --oneline cf21613..HEAD` (before this report's update)
 
 ```text
+a842d66 test(jobs): hold every command's slot until the burst is counted
+9c6daff docs(phase-5): add the implementer report
 1f68528 test(mcp): measure the per-request server build
 7094de2 test(mcp): clamp the wait against a one-second maximum
 8b004c0 docs: record the MCP endpoint, serve and edgetest as built
@@ -160,4 +165,4 @@ The jump is the job engine, the store and `modernc.org/sqlite` linked into the b
 bdfe575 test(mcp): prove how the verified principal reaches a tool handler (F6)
 ```
 
-`git status --porcelain` before writing this report: empty.
+`git status --porcelain` before writing this report: empty. At its update: `?? docs/phases/5/reports/simplify.md` only (not this implementer's file).
