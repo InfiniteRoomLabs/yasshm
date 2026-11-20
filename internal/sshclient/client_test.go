@@ -394,7 +394,7 @@ func TestCommandFaults(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseSignal: true})
 		c := testClient()
-		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +423,7 @@ func TestCommandFaults(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseSignal: true})
 		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 2 * time.Second, KillWait: 2 * time.Second})
-		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -461,7 +461,7 @@ func TestCommandFaults(t *testing.T) {
 			dctx, cancel := context.WithTimeout(ctx, deadline)
 			defer cancel()
 			began := time.Now()
-			st, err := c.Exec(dctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+			st, err := c.Exec(dctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 			if el, limit := time.Since(began), deadline+o.KillGrace+o.KillWait+2*time.Second; el > limit {
 				t.Fatalf("Exec returned after %v, past %v", el, limit)
 			}
@@ -476,7 +476,7 @@ func TestCommandFaults(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{SilentSignal: true})
 		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: 300 * time.Millisecond})
-		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -547,7 +547,7 @@ func TestCommandFaults(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{DropMidStream: true})
 		out := newNotifyBuffer()
-		st, err := testClient().Exec(ctx, tg.tid, tg.srv, "echo first; sleep 300", out, nil)
+		st, err := testClient().Exec(ctx, tg.tid, tg.srv, "echo first; sleep 30", out, nil)
 		if !errors.Is(err, CodeUnreachable) || st.Outcome != OutcomeNoStatus || !st.MayStillRun {
 			t.Fatalf("status %+v err %v", st, err)
 		}
@@ -558,7 +558,7 @@ func TestCommandFaults(t *testing.T) {
 	t.Run("sad/an unknown signal name is refused locally", func(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
-		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -584,7 +584,7 @@ func TestCommandFaults(t *testing.T) {
 	t.Run("corner/concurrent Signal and Wait", func(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
-		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -616,7 +616,7 @@ func TestCommandFaults(t *testing.T) {
 	t.Run("corner/two Waits with ending contexts run one stop sequence", func(t *testing.T) {
 		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
-		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

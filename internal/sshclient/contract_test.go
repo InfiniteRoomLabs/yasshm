@@ -86,11 +86,45 @@ func exec1(t *testing.T, tg target, c *Client, command string) (st ExitStatus, s
 	return st, out.String(), errb.String()
 }
 
+// readyCommand prints the pid of the session's shell, then replaces the
+// shell (bash on the CI runner, which ignores SIGQUIT and discards a QUIT
+// that arrives before its exec) with sh, which prints "ready" and execs
+// sleep. A caller that waits for "ready" signals sh or sleep, never bash.
+const readyCommand = `echo $$; exec sh -c 'echo ready; exec sleep 30'`
+
+// startReady starts readyCommand and returns once the remote side printed
+// "ready", so a signal cannot reach a shell that ignores it.
+func startReady(t *testing.T, tg target, c *Client) (cmd *Command, pid int) {
+	t.Helper()
+	out := newNotifyBuffer()
+	cmd, pid = startWithPidOut(t, tg, c, readyCommand, out)
+	out.waitFor(t, "ready\n", 10*time.Second)
+	return cmd, pid
+}
+
+// waitBounded waits at most 10 seconds for cmd: a signal that was accepted
+// but never took effect fails in seconds, not after the command's sleep.
+func waitBounded(t *testing.T, cmd *Command) (ExitStatus, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	st, err := cmd.Wait(ctx)
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the command did not end within 10 s (a signal accepted but not delivered?): status %+v", st)
+	}
+	return st, err
+}
+
 // startWithPid starts command, which must print one pid as its first line,
 // and returns the handle and the pid; the pid is killed in a cleanup.
 func startWithPid(t *testing.T, tg target, c *Client, command string) (cmd *Command, pid int) {
 	t.Helper()
-	out := newNotifyBuffer()
+	return startWithPidOut(t, tg, c, command, newNotifyBuffer())
+}
+
+// startWithPidOut is startWithPid with the caller's output buffer.
+func startWithPidOut(t *testing.T, tg target, c *Client, command string, out *notifyBuffer) (cmd *Command, pid int) {
+	t.Helper()
 	cmd, err := c.Start(context.Background(), tg.tid, tg.srv, command, out, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +209,7 @@ var scenarios = []scenario{
 			t.Fatal("the command finished while the writer was blocked: output was buffered without bound")
 		}
 		close(w.release)
-		st, err := cmd.Wait(context.Background())
+		st, err := waitBounded(t, cmd)
 		if err != nil || st.Code != 0 || w.n != 16_000_000 {
 			t.Fatalf("status %+v err %v bytes %d", st, err, w.n)
 		}
@@ -186,7 +220,7 @@ var scenarios = []scenario{
 	{"happy/a deadline sends TERM and the error is timeout", func(t *testing.T, tg target, c *Client) {
 		// Connect outside the deadline, so a slow connect under -race cannot
 		// eat the budget.
-		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, "sleep 300", nil, nil)
+		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, "sleep 30", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -202,7 +236,7 @@ var scenarios = []scenario{
 	}},
 	{"raging/a command that traps TERM is ended by KILL after the grace", func(t *testing.T, tg target, c *Client) {
 		out := newNotifyBuffer()
-		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, `trap "" TERM; echo ready; sleep 300`, out, nil)
+		cmd, err := c.Start(context.Background(), tg.tid, tg.srv, `trap "" TERM; echo ready; sleep 30`, out, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -222,7 +256,7 @@ var scenarios = []scenario{
 		}
 	}},
 	{"happy/TERM reaches a forked child in the process group", func(t *testing.T, tg target, c *Client) {
-		cmd, pid := startWithPid(t, tg, c, "sleep 300 & echo $!; wait")
+		cmd, pid := startWithPid(t, tg, c, "sleep 30 & echo $!; wait")
 		if !alive(pid) {
 			t.Fatalf("child %d is not running", pid)
 		}
@@ -244,7 +278,7 @@ var scenarios = []scenario{
 			t.Logf("no setsid binary here; the survivor case was not observed")
 			return
 		}
-		cmd, pid := startWithPid(t, tg, c, "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!; sleep 300")
+		cmd, pid := startWithPid(t, tg, c, "setsid sleep 30 </dev/null >/dev/null 2>&1 & echo $!; sleep 30")
 		// $! is printed before the child has called setsid(); stop only
 		// once it leads its own process group.
 		if !leakcheck.Poll(5*time.Second, func() bool { return pgid(pid) == pid }) {
@@ -269,12 +303,12 @@ var scenarios = []scenario{
 		}
 	}},
 	{"happy/the signal request is accepted and delivered", func(t *testing.T, tg target, c *Client) {
-		cmd, pid := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+		cmd, pid := startReady(t, tg, c)
 		if err := cmd.Signal("TERM"); err != nil {
 			t.Fatalf("Signal(TERM) = %v", err)
 		}
 		t.Logf("F10 observed (%s): signal request TERM with want-reply was ACCEPTED", tg.banner)
-		st, err := cmd.Wait(context.Background())
+		st, err := waitBounded(t, cmd)
 		if err != nil || st.Outcome != OutcomeSignaled || st.Signal != "TERM" || st.MayStillRun {
 			t.Fatalf("status %+v err %v", st, err)
 		}
@@ -282,11 +316,11 @@ var scenarios = []scenario{
 			t.Fatalf("pid %d still alive", pid)
 		}
 		for _, name := range []string{"INT", "HUP", "QUIT", "USR1", "USR2", "KILL"} {
-			cmd2, _ := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+			cmd2, _ := startReady(t, tg, c)
 			if err := cmd2.Signal(name); err != nil {
 				t.Fatalf("Signal(%s) = %v", name, err)
 			}
-			st, _ := cmd2.Wait(context.Background())
+			st, _ := waitBounded(t, cmd2)
 			if st.Outcome != OutcomeSignaled || st.Signal != name {
 				t.Fatalf("%s: status %+v", name, st)
 			}
@@ -294,11 +328,11 @@ var scenarios = []scenario{
 		t.Logf("F10 observed (%s): INT HUP QUIT USR1 USR2 KILL accepted and delivered", tg.banner)
 	}},
 	{"corner/closing the session does not stop the command", func(t *testing.T, tg target, c *Client) {
-		cmd, pid := startWithPid(t, tg, c, "echo $$; exec sleep 300")
+		cmd, pid := startReady(t, tg, c)
 		if err := cmd.Close(); err != nil {
 			t.Fatal(err)
 		}
-		st, err := cmd.Wait(context.Background())
+		st, err := waitBounded(t, cmd)
 		if err != nil || !st.MayStillRun || st.Outcome != OutcomeNoStatus {
 			t.Fatalf("status %+v err %v", st, err)
 		}
@@ -331,7 +365,7 @@ var scenarios = []scenario{
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cmd.Wait(context.Background()); err != nil {
+		if _, err := waitBounded(t, cmd); err != nil {
 			t.Fatal(err)
 		}
 		if err := cmd.Signal("TERM"); !errors.Is(err, ErrNotRunning) {

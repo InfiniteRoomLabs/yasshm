@@ -202,6 +202,20 @@ func (b *notifyBuffer) String() string {
 	return b.buf.String()
 }
 
+// waitFor waits until the buffer holds substr.
+func (b *notifyBuffer) waitFor(t *testing.T, substr string, d time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for !strings.Contains(b.String(), substr) {
+		select {
+		case <-b.wake:
+		case <-timer.C:
+			t.Fatalf("no %q in the output within %v (have %q)", substr, d, b.String())
+		}
+	}
+}
+
 // waitLine waits until the buffer holds a complete line and returns the
 // first one.
 func (b *notifyBuffer) waitLine(t *testing.T, d time.Duration) string {

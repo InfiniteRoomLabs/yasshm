@@ -96,7 +96,7 @@ func TestServer(t *testing.T) {
 		if ok, _, _ := c.SendRequest("tcpip-forward", true, nil); ok {
 			t.Fatal("forwarding accepted")
 		}
-		if err := sess.Start("sleep 300"); err != nil {
+		if err := sess.Start("sleep 30"); err != nil {
 			t.Fatal(err)
 		}
 		// The server registers the process before it answers exec, so
