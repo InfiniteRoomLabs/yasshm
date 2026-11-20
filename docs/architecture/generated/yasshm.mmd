@@ -23,6 +23,8 @@ graph TB
   Yasshm.Http -. "`verifies every request`" .-> Yasshm.Auth
   Yasshm.Http -. "`dispatches tool calls`" .-> Yasshm.Tools
   Yasshm.Auth -. "`reads the identity mapping`" .-> Yasshm.Config
+  Yasshm.Auth -. "`writes auth.accepted before acting and 
+auth.rejected`" .-> Yasshm.Audit
   Yasshm.Tools -. "`checks grant, access level and denylist`" .-> Yasshm.Policy
   Yasshm.Tools -. "`submits and queries commands`" .-> Yasshm.Jobs
   Yasshm.Tools -. "`appends one event per call`" .-> Yasshm.Audit

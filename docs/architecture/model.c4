@@ -35,9 +35,8 @@ model {
     }
 
     auth = component 'Authenticator' {
-      #planned
-      technology 'Access JWT verification against a cached JWKS'
-      description 'Turns a request into a principal and a tenant, or rejects it'
+      technology 'Go (internal/auth), github.com/go-jose/go-jose/v4'
+      description 'Verifies the Access application token (RS256 only) against a cached, rate-limited JWKS, maps it to a principal and a tenant, or rejects it; the middleware writes auth.accepted before the request goes on'
     }
 
     tools = component 'Tool handlers' {
@@ -91,6 +90,7 @@ model {
     jobs -> outputs 'streams captured output'
     jobs -> audit 'writes command events before acting'
     auth -> config 'reads the identity mapping'
+    auth -> audit 'writes auth.accepted before acting and auth.rejected'
     policy -> config 'reads tenants, grants and rules'
     ssh -> config 'reads server definitions, the key file and the pinned host keys at connect'
   }

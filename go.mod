@@ -3,6 +3,7 @@ module github.com/InfiniteRoomLabs/yasshm
 go 1.27
 
 require (
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/pkg/sftp v1.13.12
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/crypto v0.59.0
