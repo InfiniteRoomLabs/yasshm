@@ -24,7 +24,8 @@ type ReadRequest struct {
 	// max_result_bytes means max_result_bytes.
 	MaxBytes int64
 	// Wait, when positive, blocks until there are bytes past the offset,
-	// the command finishes, Wait passes or the context ends.
+	// the command finishes, Wait passes (at most the tenant's
+	// max_wait_seconds) or the context ends.
 	Wait time.Duration
 }
 
@@ -64,6 +65,7 @@ func (e *Engine) ReadOutput(ctx context.Context, tid tenant.TenantID, id tenant.
 	if err != nil {
 		return Output{}, err
 	}
+	req.Wait = min(req.Wait, time.Duration(ts.t.Limits.MaxWaitSeconds)*time.Second)
 	limit := ts.t.Limits.MaxResultBytes
 	if req.MaxBytes > 0 && req.MaxBytes < limit {
 		limit = req.MaxBytes

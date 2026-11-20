@@ -61,6 +61,23 @@ func alive(pid int) bool {
 	return i > 0 && i+2 < len(b) && b[i+2] != 'Z'
 }
 
+func TestExecReplyFirst(t *testing.T) {
+	t.Run("edge/the exec reply comes before a fast command's exit and close", func(t *testing.T) {
+		s := Start(t, Options{})
+		c := dial(t, s)
+		for i := range 300 {
+			sess, err := c.NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sess.Run("true"); err != nil {
+				t.Fatalf("run %d: %v", i, err)
+			}
+			_ = sess.Close()
+		}
+	})
+}
+
 func TestServer(t *testing.T) {
 	t.Run("happy/exec, refused requests are recorded, Close kills the children", func(t *testing.T) {
 		before := len(serverGoroutines())

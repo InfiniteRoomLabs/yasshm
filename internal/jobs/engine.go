@@ -33,7 +33,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -132,9 +131,21 @@ type job struct {
 	start  time.Time
 	done   chan struct{}
 
+	// killMu is held by Kill from setting killRequested until it knows
+	// whether the signal reached a running command, and by run before it
+	// reads the flags, so a kill that races a natural exit is not counted.
+	killMu sync.Mutex
+
 	mu            sync.Mutex
 	killRequested bool
 	mayStillRun   bool
+}
+
+// pendingEnd is a command whose end could not be written to the store (a
+// full disk, a locked database): this engine reports it as finished, and the
+// janitor retries the write.
+type pendingEnd struct {
+	f *store.Final
 }
 
 // errShutdown and errDisk are the causes the engine cancels a command's
@@ -154,7 +165,9 @@ type Engine struct {
 	openOutput openOutputFunc
 
 	mu      sync.Mutex
+	hk      hooks // guarded by mu; read with e.hooks()
 	jobs    map[key]*job
+	pending map[key]*pendingEnd
 	closing bool
 	started bool
 	wg      sync.WaitGroup // one per reserved slot: Start in flight or a running job
@@ -162,8 +175,25 @@ type Engine struct {
 	storeClosed  atomic.Bool
 	janitorStop  chan struct{}
 	janitorDone  chan struct{}
+	wake         chan struct{} // one slot: a command finished, run the janitor
 	shutdownDone chan struct{}
 	shutdownErr  error
+}
+
+// hooks are the store writes that can fail for lack of space, and a point
+// in Kill, which tests replace.
+type hooks struct {
+	finishRow func(ctx context.Context, tid tenant.TenantID, id tenant.CommandID, f *store.Final) error
+	deleteRow func(ctx context.Context, tid tenant.TenantID, id tenant.CommandID) error
+	// beforeSignal runs in Kill between marking the kill and sending the
+	// signal (nil in production).
+	beforeSignal func(j *job)
+}
+
+func (e *Engine) hooks() hooks {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.hk
 }
 
 // New opens the store in cfg.DataDir, marks every command left running by an
@@ -209,14 +239,16 @@ func New(ctx context.Context, cfg Config) (*Engine, error) {
 	root, cancel := context.WithCancelCause(context.Background())
 	e := &Engine{
 		cfg: cfg, st: st, tenants: tenants, root: root, cancelRoot: cancel, openOutput: defaultOpenOutput,
-		jobs: map[key]*job{}, janitorStop: make(chan struct{}), janitorDone: make(chan struct{}), shutdownDone: make(chan struct{}),
+		jobs: map[key]*job{}, pending: map[key]*pendingEnd{}, janitorStop: make(chan struct{}), janitorDone: make(chan struct{}),
+		wake: make(chan struct{}, 1), shutdownDone: make(chan struct{}),
 	}
+	e.hk = hooks{finishRow: st.Finish, deleteRow: st.DeleteFinished}
 	if _, err := e.Recover(ctx); err != nil {
 		cancel(nil)
 		_ = st.Close(ctx)
 		return nil, err
 	}
-	e.sweepOrphans()
+	e.sweepOrphans(ctx)
 	go e.janitor()
 	return e, nil
 }
@@ -312,6 +344,13 @@ func (e *Engine) Start(ctx context.Context, tid tenant.TenantID, by audit.Actor,
 	if err != nil {
 		return Record{}, err
 	}
+	used, err := e.usedBytes(ctx, tid)
+	if err != nil {
+		return Record{}, internal("could not read the tenant's usage", err)
+	}
+	if used >= lim.MaxDataBytes {
+		return Record{}, busy(LimitData)
+	}
 	release, err := e.reserve(ts, sid)
 	if err != nil {
 		return Record{}, err
@@ -342,22 +381,22 @@ func (e *Engine) Start(ctx context.Context, tid tenant.TenantID, by audit.Actor,
 		return startErr
 	})
 	fail := func(code Code, audited bool) Record {
-		if j.cap != nil {
-			e.report(j.cap.close())
-		}
 		snap := snapshot{}
 		if j.cap != nil {
+			e.report(j.cap.close())
 			snap = j.cap.snapshot()
 		}
 		f := e.final(&snap, StatusError, string(code))
-		e.report(e.st.Finish(bg, tid, id, f))
-		if audited {
-			e.report(e.cfg.Audit.Write(audit.CommandFinished(by, sid, id, finishEvent(f, rec.CreatedAt))))
-		}
+		// A start the server never answered may have reached it (spec
+		// 5.5 callout): the command may be running.
+		var se *sshclient.Error
+		f.MayStillRun = errors.As(startErr, &se) && se.MayStillRun()
+		e.recordEnd(bg, j, f, rec.CreatedAt, audited)
 		cancel(nil)
 		stopT()
 		release()
-		r, gerr := e.st.Get(bg, tid, id)
+		e.wakeJanitor()
+		r, gerr := e.Get(bg, tid, id)
 		e.report(gerr)
 		return r
 	}
@@ -372,13 +411,14 @@ func (e *Engine) Start(ctx context.Context, tid tenant.TenantID, by audit.Actor,
 		r := fail(Code(sshclient.CodeOf(startErr)), true)
 		return r, sshError(startErr)
 	}
+	// The handle is live (Kill, Shutdown) before the two synced writes.
 	j.start = e.now()
-	e.report(e.st.MarkStarted(bg, tid, id, j.start))
-	e.report(e.cfg.Audit.Write(audit.CommandStarted(by, sid, id)))
 	e.mu.Lock()
 	e.jobs[key{tid, id}] = j
 	e.mu.Unlock()
-	go e.run(j, release) //nolint:contextcheck // the waiter belongs to the engine and outlives the request (D10)
+	e.report(e.st.MarkStarted(bg, tid, id, j.start))
+	e.report(e.cfg.Audit.Write(audit.CommandStarted(by, sid, id)))
+	go e.run(j, release)
 	return e.Get(bg, tid, id)
 }
 
@@ -455,14 +495,19 @@ func finishEvent(f *store.Final, since time.Time) audit.Finish {
 	}
 }
 
-// run waits for a started command, records how it ended and frees its slots.
+// run waits for a started command, records how it ended and frees its
+// slots. The end becomes visible to Wait and to waiting readers (done is
+// closed) only after the record, the command.finished event and the slot
+// release, so a caller that sees a command finish can start the next one.
 func (e *Engine) run(j *job, release func()) {
 	st, werr := j.h.Wait(j.ctx)
 	e.report(j.cap.close())
 	snap := j.cap.snapshot()
+	j.killMu.Lock() // a Kill in flight settles its flags first
 	j.mu.Lock()
 	killed, may := j.killRequested, j.mayStillRun
 	j.mu.Unlock()
+	j.killMu.Unlock()
 	status, code := classify(&st, werr, context.Cause(j.ctx), snap.diskErr != nil, killed)
 	f := e.final(&snap, status, code)
 	switch st.Outcome {
@@ -473,22 +518,62 @@ func (e *Engine) run(j *job, release func()) {
 		f.Signal = st.Signal
 	}
 	f.MayStillRun = st.MayStillRun || may
-	bg := context.WithoutCancel(e.root)
-	if err := e.st.Finish(bg, j.tid, j.id, f); err != nil {
-		e.report(fmt.Errorf("jobs: record the end of command %s: %w", j.id, err))
-	}
-	e.report(e.cfg.Audit.Write(audit.CommandFinished(j.actor, j.server, j.id, finishEvent(f, j.start))))
+	e.recordEnd(e.root, j, f, j.start, true)
 	e.mu.Lock()
 	delete(e.jobs, key{j.tid, j.id})
 	e.mu.Unlock()
 	j.cancel(nil)
 	j.stopT()
-	close(j.done)
 	release()
+	e.wakeJanitor()
+	close(j.done)
+}
+
+// finishBackoff are the pauses between the attempts to write a command's
+// end; a test shortens them.
+var finishBackoff = []time.Duration{20 * time.Millisecond, 80 * time.Millisecond, 320 * time.Millisecond}
+
+// recordEnd writes a command's end to the store, retrying a failed write a
+// few times. A record that has already finished (another engine recovered
+// it) keeps its status and gets no second command.finished. A write that
+// still fails is kept as pending: this engine reports the command finished,
+// and the janitor retries the write.
+func (e *Engine) recordEnd(ctx context.Context, j *job, f *store.Final, since time.Time, audited bool) {
+	bg := context.WithoutCancel(ctx)
+	var err error
+	for i := 0; ; i++ {
+		err = e.hooks().finishRow(bg, j.tid, j.id, f)
+		if err == nil || errors.Is(err, store.ErrNotRunning) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalid) || i >= len(finishBackoff) {
+			break
+		}
+		time.Sleep(finishBackoff[i]) // a bounded backoff before retrying a failed write
+	}
+	switch {
+	case errors.Is(err, store.ErrNotRunning):
+		e.report(fmt.Errorf("jobs: the record of command %s had already finished: %w", j.id, err))
+		return
+	case err != nil:
+		e.report(fmt.Errorf("jobs: record the end of command %s (kept in memory, retried by the janitor): %w", j.id, err))
+		e.mu.Lock()
+		e.pending[key{j.tid, j.id}] = &pendingEnd{f: f}
+		e.mu.Unlock()
+	}
+	if audited {
+		e.report(e.cfg.Audit.Write(audit.CommandFinished(j.actor, j.server, j.id, finishEvent(f, since))))
+	}
+}
+
+// wakeJanitor asks the janitor for a pass without blocking.
+func (e *Engine) wakeJanitor() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
+	}
 }
 
 // classify maps how a command ended to its status and error code. It is the
-// whole of the mapping of spec 5.6 and the 5.5 callout:
+// whole of the mapping of spec 5.6 and the 5.5 callout, in this order (a
+// timeout wins over a kill request):
 //   - an output file that could not be written: error, internal;
 //   - ended because the engine shut down: killed;
 //   - ended by the command's timeout (Stopped is deadline): timed_out, even
@@ -562,9 +647,19 @@ func (e *Engine) Get(ctx context.Context, tid tenant.TenantID, id tenant.Command
 	return r, nil
 }
 
-// overlay replaces a running record's counters with the live ones.
+// overlay replaces a running record's counters with the live ones, or its
+// end with the one this engine could not write yet.
 func (e *Engine) overlay(r *Record) {
 	if r.Status != StatusRunning {
+		return
+	}
+	e.mu.Lock()
+	p := e.pending[key{r.Tenant, r.ID}]
+	e.mu.Unlock()
+	if p != nil {
+		f := p.f
+		r.Status, r.ExitCode, r.Signal, r.ErrorCode, r.FinishedAt = f.Status, f.ExitCode, f.Signal, f.ErrorCode, f.FinishedAt.UTC().Truncate(time.Microsecond)
+		r.StdoutBytes, r.StderrBytes, r.StoredBytes, r.Truncated, r.MayStillRun = f.StdoutBytes, f.StderrBytes, f.StoredBytes, f.Truncated, r.MayStillRun || f.MayStillRun
 		return
 	}
 	j := e.live(r.Tenant, r.ID)
@@ -578,31 +673,27 @@ func (e *Engine) overlay(r *Record) {
 	j.mu.Unlock()
 }
 
-// Wait waits up to d for the tenant's command id to finish, or until ctx
-// ends, and returns the record as it is then, finished or not.
+// Wait waits up to d (at most the tenant's max_wait_seconds) for the
+// tenant's command id to finish, or until ctx ends, and returns the record as
+// it is then, finished or not. A command counts as finished once the engine
+// is done with it: its record, its command.finished event and its slots.
 func (e *Engine) Wait(ctx context.Context, tid tenant.TenantID, id tenant.CommandID, d time.Duration) (Record, error) {
+	ts, err := e.tenant(tid)
+	if err != nil {
+		return Record{}, err
+	}
+	d = min(d, time.Duration(ts.t.Limits.MaxWaitSeconds)*time.Second)
+	j := e.live(tid, id) // before the record: a live job is waited for whatever the record says
 	r, err := e.Get(ctx, tid, id)
-	if err != nil || r.Status != StatusRunning || d <= 0 {
+	if err != nil || j == nil || d <= 0 {
 		return r, err
 	}
-	if j := e.live(tid, id); j != nil {
-		t := time.NewTimer(d)
-		select {
-		case <-j.done:
-		case <-t.C:
-		case <-ctx.Done():
-		}
-		t.Stop()
+	t := time.NewTimer(d)
+	select {
+	case <-j.done:
+	case <-t.C:
+	case <-ctx.Done():
 	}
+	t.Stop()
 	return e.Get(context.WithoutCancel(ctx), tid, id)
-}
-
-// sortedTenants returns the tenant ids in order.
-func (e *Engine) sortedTenants() []tenant.TenantID {
-	out := make([]tenant.TenantID, 0, len(e.tenants))
-	for tid := range e.tenants {
-		out = append(out, tid)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
 }

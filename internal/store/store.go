@@ -41,6 +41,13 @@ import (
 // FileName is the database's name inside the data directory.
 const FileName = "yasshm.db"
 
+// lockRetry is how long Open keeps trying a lock another holder has.
+const lockRetry = time.Second
+
+// LockName is the lock file inside the data directory: one gateway at a time
+// holds an exclusive flock on it from Open to Close.
+const LockName = "yasshm.lock"
+
 // busyTimeoutMillis is how long a statement waits for a lock held by another
 // connection (another process, or a second Store in tests) before it fails.
 const busyTimeoutMillis = 5000
@@ -59,6 +66,9 @@ var (
 	// ErrUnsafe: the data directory or database file is not private to
 	// the gateway's user.
 	ErrUnsafe = errors.New("store: unsafe permissions")
+	// ErrLocked: another process (or another Store in this one) has the
+	// data directory open.
+	ErrLocked = errors.New("store: the data directory is in use by another gateway")
 	// ErrInvalid: a tenant id, command id or field is not valid.
 	ErrInvalid = errors.New("store: invalid argument")
 	// ErrExists: a record with that id already exists in the tenant.
@@ -87,7 +97,8 @@ func ValidServerID(sid tenant.ServerID) bool { return serverPattern.MatchString(
 
 // Store is the command record store. It is safe for concurrent use.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	lock *os.File
 }
 
 // Open opens (creating it if needed) the database in dataDir and applies the
@@ -101,6 +112,52 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	if err := CheckPrivateDir(dataDir); err != nil {
 		return nil, err
 	}
+	lock, err := lockDir(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	s, err := open(ctx, dataDir)
+	if err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	s.lock = lock
+	return s, nil
+}
+
+// lockDir takes a non-blocking exclusive flock on the data directory's lock
+// file (created 0600), so a second gateway on the same directory fails at
+// once instead of marking the first one's commands lost. The lock is held by
+// the open file and released when it is closed, also when the process dies.
+func lockDir(dataDir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dataDir, LockName), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) //nolint:gosec // G304: the data directory joined with a constant name
+	if err != nil {
+		return nil, fmt.Errorf("store: lock file: %w", err)
+	}
+	// A lock just released can still be held for a moment by a child the
+	// process is starting (between fork and exec the child holds every
+	// descriptor, close-on-exec ones included), so a held lock is tried
+	// again for a short while before Open gives up.
+	deadline := time.Now().Add(lockRetry)
+	for {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond) // a bounded retry of a non-blocking lock
+	}
+	_ = f.Close()
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return nil, ErrLocked
+	}
+	return nil, fmt.Errorf("store: lock the data directory: %w", err)
+}
+
+// open opens the database of a locked data directory.
+func open(ctx context.Context, dataDir string) (*Store, error) {
 	path := filepath.Join(dataDir, FileName)
 	if err := ensureFile(path); err != nil {
 		return nil, err
@@ -181,13 +238,20 @@ func ensureFile(path string) error {
 	return nil
 }
 
-// Close checkpoints the WAL into the database file and closes it. ctx bounds
-// the checkpoint; the database is closed whatever happens to it.
+// Close checkpoints the WAL into the database file, closes it and releases
+// the data directory's lock. ctx bounds the checkpoint; the database is
+// closed whatever happens to it.
 func (s *Store) Close(ctx context.Context) error {
 	_, cerr := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 	err := s.db.Close()
 	if cerr != nil && err == nil {
 		err = fmt.Errorf("store: checkpoint: %w", cerr)
+	}
+	if s.lock != nil {
+		if lerr := s.lock.Close(); lerr != nil && err == nil {
+			err = lerr
+		}
+		s.lock = nil
 	}
 	return err
 }
@@ -229,10 +293,20 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("store: begin migration: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Read the version again inside the write transaction, so two
-	// processes opening a new database cannot both apply a migration.
+	return migrateTx(ctx, tx)
+}
+
+// migrateTx applies the missing migrations inside tx. It reads the version
+// again inside the write transaction, so two processes opening a new
+// database cannot both apply a migration, and a database a newer binary
+// migrated in the meantime is refused, never stamped back down.
+func migrateTx(ctx context.Context, tx *sql.Tx) error {
+	var v int
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
 		return fmt.Errorf("store: read schema version: %w", err)
+	}
+	if v > len(migrations) || v < 0 {
+		return fmt.Errorf("%w: the database has schema version %d and this binary knows versions up to %d; use a newer yasshm or another data directory", ErrTooNew, v, len(migrations))
 	}
 	for i := v; i < len(migrations); i++ {
 		if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {

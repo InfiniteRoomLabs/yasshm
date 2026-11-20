@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
 
 const (
@@ -23,16 +23,6 @@ const (
 var t0 = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 
 func id(n int) tenant.CommandID { return tenant.CommandID(fmt.Sprintf("%032x", n)) }
-
-// privDir returns a new 0700 directory (t.TempDir gives 0755).
-func privDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: a directory needs the x bit; 0700 is the mode under test
-		t.Fatal(err)
-	}
-	return dir
-}
 
 func openT(ctx context.Context, t *testing.T, dir string) *Store {
 	t.Helper()
@@ -68,7 +58,7 @@ func finish(ctx context.Context, t *testing.T, s *Store, tid tenant.TenantID, n 
 func TestOpen(t *testing.T) {
 	ctx := context.Background()
 	t.Run("happy/creates a private database in WAL mode at the current version", func(t *testing.T) {
-		dir := privDir(t)
+		dir := leakcheck.PrivDir(t)
 		s := openT(ctx, t, dir)
 		insert(ctx, t, s, rec(tA, 1, t0)) // makes SQLite create the -wal file
 		for _, name := range []string{FileName, FileName + "-wal", FileName + "-shm"} {
@@ -96,7 +86,7 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("happy/reopen is idempotent and keeps the data", func(t *testing.T) {
-		dir := privDir(t)
+		dir := leakcheck.PrivDir(t)
 		s, err := Open(ctx, dir)
 		if err != nil {
 			t.Fatal(err)
@@ -117,7 +107,7 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("sad/a database newer than the binary is refused and not written", func(t *testing.T) {
-		dir := privDir(t)
+		dir := leakcheck.PrivDir(t)
 		p := filepath.Join(dir, FileName)
 		if err := os.WriteFile(p, nil, 0o600); err != nil {
 			t.Fatal(err)
@@ -157,7 +147,7 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("sad/a group-accessible data directory is refused", func(t *testing.T) {
-		dir := privDir(t)
+		dir := leakcheck.PrivDir(t)
 		if err := os.Chmod(dir, 0o750); err != nil { //nolint:gosec // G302: the test needs the unsafe mode
 			t.Fatal(err)
 		}
@@ -169,19 +159,19 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("sad/a data directory that is a file or missing is refused", func(t *testing.T) {
-		f := filepath.Join(privDir(t), "file")
+		f := filepath.Join(leakcheck.PrivDir(t), "file")
 		if err := os.WriteFile(f, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := Open(ctx, f); !errors.Is(err, ErrUnsafe) {
 			t.Fatalf("file: err = %v", err)
 		}
-		if _, err := Open(ctx, filepath.Join(privDir(t), "missing")); err == nil {
+		if _, err := Open(ctx, filepath.Join(leakcheck.PrivDir(t), "missing")); err == nil {
 			t.Fatal("missing directory accepted")
 		}
 	})
 	t.Run("sad/a database file with group or other bits is refused", func(t *testing.T) {
-		dir := privDir(t)
+		dir := leakcheck.PrivDir(t)
 		if err := os.WriteFile(filepath.Join(dir, FileName), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -193,8 +183,8 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("raging/a database path that is a symbolic link or a directory is refused", func(t *testing.T) {
-		dir := privDir(t)
-		target := filepath.Join(privDir(t), "elsewhere.db")
+		dir := leakcheck.PrivDir(t)
+		target := filepath.Join(leakcheck.PrivDir(t), "elsewhere.db")
 		if err := os.WriteFile(target, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +194,7 @@ func TestOpen(t *testing.T) {
 		if _, err := Open(ctx, dir); err == nil {
 			t.Fatal("symbolic link accepted")
 		}
-		dir2 := privDir(t)
+		dir2 := leakcheck.PrivDir(t)
 		if err := os.Mkdir(filepath.Join(dir2, FileName), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -213,7 +203,7 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("sad/a file that is not a database fails to open", func(t *testing.T) {
-		dir := privDir(t)
+		dir := leakcheck.PrivDir(t)
 		if err := os.WriteFile(filepath.Join(dir, FileName), bytes.Repeat([]byte("not sqlite "), 100), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -222,7 +212,7 @@ func TestOpen(t *testing.T) {
 		}
 	})
 	t.Run("edge/a data directory with URL metacharacters in its name works", func(t *testing.T) {
-		dir := filepath.Join(privDir(t), "a?b#c%20d")
+		dir := filepath.Join(leakcheck.PrivDir(t), "a?b#c%20d")
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -232,27 +222,57 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("database not at the expected path: %v", err)
 		}
 	})
-	t.Run("corner/two stores on one file share it under the busy timeout", func(t *testing.T) {
-		dir := privDir(t)
-		a, b := openT(ctx, t, dir), openT(ctx, t, dir)
-		var wg sync.WaitGroup
-		for i := range 20 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				s := a
-				if i%2 == 1 {
-					s = b
-				}
-				if err := s.Insert(ctx, tA, rec(tA, i+1, t0.Add(time.Duration(i)*time.Second))); err != nil {
-					t.Error(err)
-				}
-			}()
+	t.Run("sad/a second store on the same data directory is refused without a write", func(t *testing.T) {
+		dir := leakcheck.PrivDir(t)
+		a := openT(ctx, t, dir)
+		insert(ctx, t, a, rec(tA, 1, t0))
+		before, err := os.ReadFile(filepath.Join(dir, FileName)) //nolint:gosec // G304: a test temp file
+		if err != nil {
+			t.Fatal(err)
 		}
-		wg.Wait()
-		got, _, err := a.List(ctx, tA, Filter{Limit: 100})
-		if err != nil || len(got) != 20 {
-			t.Fatalf("%d records, %v", len(got), err)
+		if _, err := Open(ctx, dir); !errors.Is(err, ErrLocked) {
+			t.Fatalf("err = %v, want ErrLocked", err)
+		}
+		after, _ := os.ReadFile(filepath.Join(dir, FileName)) //nolint:gosec // G304: a test temp file
+		if !bytes.Equal(before, after) {
+			t.Fatal("the refused open wrote the database")
+		}
+		if fi, err := os.Stat(filepath.Join(dir, LockName)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("lock file %v %v", fi, err)
+		}
+		if err := a.Close(ctx); err != nil {
+			t.Fatal(err)
+		}
+		b := openT(ctx, t, dir)
+		if _, err := b.Get(ctx, tA, id(1)); err != nil {
+			t.Fatal("reopen after close:", err)
+		}
+	})
+	t.Run("sad/a lock file that cannot be opened stops Open", func(t *testing.T) {
+		dir := leakcheck.PrivDir(t)
+		if err := os.Mkdir(filepath.Join(dir, LockName), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(ctx, dir); err == nil || errors.Is(err, ErrLocked) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("raging/a database newer than the binary found inside the migration transaction is refused", func(t *testing.T) {
+		s := openT(ctx, t, leakcheck.PrivDir(t))
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 99"); err != nil {
+			t.Fatal(err)
+		}
+		if err := migrateTx(ctx, tx); !errors.Is(err, ErrTooNew) {
+			t.Fatalf("err = %v, want ErrTooNew", err)
+		}
+		var v int
+		if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil || v != 99 {
+			t.Fatalf("version stamped down to %d (%v)", v, err)
 		}
 	})
 }
@@ -276,7 +296,7 @@ func TestStateMachine(t *testing.T) {
 		}
 	})
 	ctx := context.Background()
-	s := openT(ctx, t, privDir(t))
+	s := openT(ctx, t, leakcheck.PrivDir(t))
 	t.Run("happy/finish records the final fields", func(t *testing.T) {
 		insert(ctx, t, s, rec(tA, 1, t0))
 		code := 3
@@ -347,7 +367,7 @@ func TestStateMachine(t *testing.T) {
 
 func TestInsertAndGet(t *testing.T) {
 	ctx := context.Background()
-	s := openT(ctx, t, privDir(t))
+	s := openT(ctx, t, leakcheck.PrivDir(t))
 	t.Run("happy/round trip keeps every field", func(t *testing.T) {
 		r := rec(tA, 1, t0.Add(123*time.Microsecond))
 		r.Command = "printf 'x\\0y' | wc -c ; echo \"$HOME\" -- ünïcode"
@@ -404,7 +424,7 @@ func TestInsertAndGet(t *testing.T) {
 
 func TestTenantIsolation(t *testing.T) {
 	ctx := context.Background()
-	s := openT(ctx, t, privDir(t))
+	s := openT(ctx, t, leakcheck.PrivDir(t))
 	insert(ctx, t, s, rec(tA, 1, t0))
 	insert(ctx, t, s, rec(tB, 2, t0))
 	t.Run("happy/the same id may exist in two tenants", func(t *testing.T) {
@@ -423,6 +443,12 @@ func TestTenantIsolation(t *testing.T) {
 		if err := s.DeleteFinished(ctx, tA, id(2)); !errors.Is(err, ErrNotFound) {
 			t.Error(err)
 		}
+		if err := s.MarkKillRequested(ctx, tA, id(2), t0); !errors.Is(err, ErrNotFound) {
+			t.Error(err)
+		}
+		if r, _ := s.Get(ctx, tB, id(2)); !r.KillRequestedAt.IsZero() {
+			t.Error("tenant a marked tenant b's kill request")
+		}
 		got, _, err := s.List(ctx, tA, Filter{Limit: 100})
 		if err != nil || len(got) != 1 || got[0].Tenant != tA {
 			t.Fatalf("%+v %v", got, err)
@@ -434,10 +460,25 @@ func TestTenantIsolation(t *testing.T) {
 	t.Run("happy/stored bytes and finished lists are per tenant", func(t *testing.T) {
 		finish(ctx, t, s, tA, 1, StatusSucceeded, t0, 100)
 		finish(ctx, t, s, tB, 2, StatusSucceeded, t0, 7)
-		if n, _ := s.StoredBytes(ctx, tA); n != 100 {
+		// Each record counts its command text ("echo hi", 7 bytes) and
+		// RowCost; finished ones also their stored output. Tenant b also
+		// has a running record with the same id as tenant a's.
+		if n, _ := s.UsedBytes(ctx, tA); n != 100+7+RowCost {
 			t.Fatalf("a: %d", n)
 		}
-		if n, _ := s.StoredBytes(ctx, tB); n != 7 {
+		if n, _ := s.UsedBytes(ctx, tB); n != 7+2*(7+RowCost) {
+			t.Fatalf("b: %d", n)
+		}
+		// A finished record of tenant b is not deleted through tenant a.
+		insert(ctx, t, s, rec(tB, 3, t0))
+		finish(ctx, t, s, tB, 3, StatusSucceeded, t0, 1)
+		if err := s.DeleteFinished(ctx, tA, id(3)); !errors.Is(err, ErrNotFound) {
+			t.Fatal(err)
+		}
+		if ok, _ := s.Exists(ctx, tB, id(3)); !ok {
+			t.Fatal("tenant a deleted tenant b's finished record")
+		}
+		if n, _ := s.UsedBytes(ctx, tB); n != 8+3*(7+RowCost) {
 			t.Fatalf("b: %d", n)
 		}
 		got, err := s.OldestFinished(ctx, tA, 10)
@@ -449,7 +490,7 @@ func TestTenantIsolation(t *testing.T) {
 
 func TestList(t *testing.T) {
 	ctx := context.Background()
-	s := openT(ctx, t, privDir(t))
+	s := openT(ctx, t, leakcheck.PrivDir(t))
 	// 25 records; 10 and 11 share a creation time, so the id breaks the tie.
 	for i := 1; i <= 25; i++ {
 		at := t0.Add(time.Duration(i) * time.Second)
@@ -535,7 +576,7 @@ func TestList(t *testing.T) {
 
 func TestRecoverAndJanitorQueries(t *testing.T) {
 	ctx := context.Background()
-	s := openT(ctx, t, privDir(t))
+	s := openT(ctx, t, leakcheck.PrivDir(t))
 	insert(ctx, t, s, rec(tA, 1, t0))
 	insert(ctx, t, s, rec(tA, 2, t0))
 	insert(ctx, t, s, rec(tB, 3, t0))
@@ -607,7 +648,7 @@ func TestRecoverAndJanitorQueries(t *testing.T) {
 		if _, err := s.FinishedBefore(ctx, "", t0, 1); !errors.Is(err, ErrInvalid) {
 			t.Fatal(err)
 		}
-		if _, err := s.StoredBytes(ctx, ""); !errors.Is(err, ErrInvalid) {
+		if _, err := s.UsedBytes(ctx, ""); !errors.Is(err, ErrInvalid) {
 			t.Fatal(err)
 		}
 		if err := s.DeleteFinished(ctx, tA, "nope"); !errors.Is(err, ErrNotFound) {
@@ -618,7 +659,7 @@ func TestRecoverAndJanitorQueries(t *testing.T) {
 
 func TestClosedStore(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, privDir(t))
+	s, err := Open(ctx, leakcheck.PrivDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +675,7 @@ func TestClosedStore(t *testing.T) {
 			func() error { _, err := s.RecoverAllTenants(ctx, t0, nil); return err }(),
 			func() error { _, _, err := s.List(ctx, tA, Filter{Limit: 1}); return err }(),
 			func() error { _, err := s.FinishedBefore(ctx, tA, t0, 1); return err }(),
-			func() error { _, err := s.StoredBytes(ctx, tA); return err }(),
+			func() error { _, err := s.UsedBytes(ctx, tA); return err }(),
 			s.DeleteFinished(ctx, tA, id(1)),
 			func() error { _, err := s.Version(ctx); return err }(),
 		}

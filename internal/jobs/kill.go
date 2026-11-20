@@ -37,33 +37,38 @@ func (e *Engine) Kill(ctx context.Context, tid tenant.TenantID, by audit.Actor, 
 	if by.Principal.Tenant != tid {
 		return Record{}, false, invalid("the principal does not belong to the tenant")
 	}
+	// A live handle is signalled whatever the stored status says (a
+	// record another process marked lost can still be stopped here).
 	j := e.live(tid, id)
-	if r.Status != StatusRunning || j == nil {
+	if j == nil {
 		return r, false, nil
 	}
 	bg := context.WithoutCancel(ctx)
 	var acted bool
 	aerr := e.cfg.Audit.Before(audit.CommandKillRequested(by, id, sig), func() error {
 		acted = true
+		j.killMu.Lock()
+		defer j.killMu.Unlock()
 		j.mu.Lock()
 		j.killRequested = true
 		j.mu.Unlock()
 		e.report(e.st.MarkKillRequested(bg, tid, id, e.now()))
+		if hook := e.hooks().beforeSignal; hook != nil {
+			hook(j)
+		}
 		serr := j.h.Signal(sig)
+		j.mu.Lock()
+		defer j.mu.Unlock()
 		switch {
 		case serr == nil:
 			delivered = true
 		case errors.Is(serr, sshclient.ErrNotRunning):
 			// It ended on its own before the signal: not a kill.
-			j.mu.Lock()
 			j.killRequested = false
-			j.mu.Unlock()
 		default:
 			// Refused or unanswered: the session is closed and the
 			// remote process may still run (spec 5.5).
-			j.mu.Lock()
 			j.mayStillRun = true
-			j.mu.Unlock()
 			e.report(e.st.MarkMayStillRun(bg, tid, id))
 		}
 		return nil

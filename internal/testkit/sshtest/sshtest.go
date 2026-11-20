@@ -213,6 +213,15 @@ func (s *Server) Accepted() int {
 	return s.accepted
 }
 
+// KeyLine renders pk in authorized_keys form ("type base64"), the form a
+// tenant.Server pins.
+func KeyLine(pk ssh.PublicKey) string {
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk)))
+}
+
+// HostKeyLine returns the key a client should pin, as KeyLine renders it.
+func (s *Server) HostKeyLine() string { return KeyLine(s.HostKey) }
+
 // Pids returns the pid of every command the server has started.
 func (s *Server) Pids() []int {
 	s.mu.Lock()
@@ -349,10 +358,11 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 			var p struct{ Command string }
 			mu.Lock()
 			ok := !started && ssh.Unmarshal(req.Payload, &p) == nil
+			var begin func()
 			if ok {
 				started = true
 				var err error
-				pid, err = s.run(c, ch, p.Command, func() {
+				pid, begin, err = s.run(c, ch, p.Command, func() {
 					mu.Lock()
 					ended = true
 					mu.Unlock()
@@ -360,8 +370,13 @@ func (s *Server) session(c net.Conn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 				ok = err == nil
 			}
 			mu.Unlock()
+			// Answer the exec request before any output, exit status or
+			// channel close can be sent, as sshd does: a fast command
+			// must not close the channel ahead of the reply.
 			_ = req.Reply(ok, nil)
-			if !ok {
+			if ok {
+				begin()
+			} else {
 				_ = ch.Close()
 			}
 		case "subsystem":
@@ -419,21 +434,23 @@ func (d *dropWriter) Write(p []byte) (int, error) {
 // run starts command with sh -c in Root, in its own process group. Like
 // OpenSSH, it reports the exit as soon as the shell is reaped, and closes
 // the channel only once both output pipes reach EOF: a background child
-// that still holds stdout keeps the channel open.
-func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (int, error) {
+// that still holds stdout keeps the channel open. It returns the pid and
+// begin, which starts streaming the output and reporting the exit; the
+// caller answers the exec request first, then calls begin.
+func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (pid int, begin func(), err error) {
 	inR, inW, err := os.Pipe()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		closeAll(inR, inW)
-		return 0, err
+		return 0, nil, err
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
 		closeAll(inR, inW, outR, outW)
-		return 0, err
+		return 0, nil, err
 	}
 	cmd := exec.Command("sh", "-c", command) //nolint:gosec // G204: the test server's job is to run the command it was sent
 	cmd.Dir = s.Root
@@ -444,15 +461,15 @@ func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (
 	select {
 	case <-s.done:
 		closeAll(inR, inW, outR, outW, errR, errW)
-		return 0, errors.New("sshtest: closed")
+		return 0, nil, errors.New("sshtest: closed")
 	default:
 	}
-	if err := cmd.Start(); err != nil {
+	if serr := cmd.Start(); serr != nil {
 		closeAll(inR, inW, outR, outW, errR, errW)
-		return 0, err
+		return 0, nil, serr
 	}
 	closeAll(inR, outW, errW)
-	pid := cmd.Process.Pid
+	pid = cmd.Process.Pid
 	s.procs[pid] = cmd
 	s.pids = append(s.pids, pid)
 	s.pipes[inW], s.pipes[outR], s.pipes[errR] = struct{}{}, struct{}{}, struct{}{}
@@ -463,9 +480,14 @@ func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (
 	var copies sync.WaitGroup
 	copies.Add(2)
 	s.wg.Add(4)
+	return pid, func() { s.stream(ch, cmd, pid, inW, outR, errR, stdout, &copies, ended) }, nil
+}
+
+// stream copies the command's output to the channel and reports its exit.
+func (s *Server) stream(ch ssh.Channel, cmd *exec.Cmd, pid int, inW, outR, errR *os.File, stdout io.Writer, copies *sync.WaitGroup, ended func()) {
 	go s.pump(nil, inW, ch)
-	go s.pump(&copies, stdout, outR)
-	go s.pump(&copies, ch.Stderr(), errR)
+	go s.pump(copies, stdout, outR)
+	go s.pump(copies, ch.Stderr(), errR)
 	go func() {
 		defer s.wg.Done()
 		_ = cmd.Wait()
@@ -478,7 +500,6 @@ func (s *Server) run(c net.Conn, ch ssh.Channel, command string, ended func()) (
 		_ = ch.CloseWrite()
 		_ = ch.Close()
 	}()
-	return pid, nil
 }
 
 // pump copies src to dst until EOF or an error, then closes the pipe end

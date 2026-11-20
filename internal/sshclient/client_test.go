@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/sftp"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
 
@@ -98,7 +99,7 @@ func TestErrors(t *testing.T) {
 }
 
 func TestTenantChecks(t *testing.T) {
-	checkLeaks(t)
+	leakcheck.Check(t)
 	tg := newSSHTest(t, sshtest.Options{})
 	c := testClient()
 	ctx := context.Background()
@@ -147,7 +148,7 @@ func TestTenantChecks(t *testing.T) {
 func TestConnectRules(t *testing.T) {
 	ctx := context.Background()
 	t.Run("happy/the client never asks for a PTY, env, agent or forwarding", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		c := testClient()
 		if _, err := c.Exec(ctx, tg.tid, tg.srv, "true", nil, nil); err != nil {
@@ -170,7 +171,7 @@ func TestConnectRules(t *testing.T) {
 		}
 	})
 	t.Run("sad/the server presents another host key", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{WrongHostKey: true})
 		_, err := testClient().Exec(ctx, tg.tid, tg.srv, "true", nil, nil)
 		var e *Error
@@ -184,7 +185,7 @@ func TestConnectRules(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("sad/the server refuses the key", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseKey: true})
 		if _, err := testClient().Exec(ctx, tg.tid, tg.srv, "true", nil, nil); !errors.Is(err, CodeAuthFailed) {
 			t.Fatalf("err = %v", err)
@@ -192,7 +193,7 @@ func TestConnectRules(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("raging/a slow banner hits the connect timeout", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{SlowBanner: 10 * time.Second})
 		c := New(Options{ConnectTimeout: 200 * time.Millisecond})
 		began := time.Now()
@@ -205,7 +206,7 @@ func TestConnectRules(t *testing.T) {
 		}
 	})
 	t.Run("sad/the caller's deadline during the handshake is timeout", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{SlowBanner: 10 * time.Second})
 		dctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 		defer cancel()
@@ -215,7 +216,7 @@ func TestConnectRules(t *testing.T) {
 		}
 	})
 	t.Run("sad/an already cancelled context", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		cctx, cancel := context.WithCancel(ctx)
 		cancel()
@@ -225,7 +226,7 @@ func TestConnectRules(t *testing.T) {
 		}
 	})
 	t.Run("sad/a cancel during the handshake with a server that never speaks", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		srv := silentServer(t)
 		c := New(Options{ConnectTimeout: 10 * time.Second})
 		cctx, cancel := context.WithCancel(ctx)
@@ -390,7 +391,7 @@ func TestPinningAndKeys(t *testing.T) {
 func TestCommandFaults(t *testing.T) {
 	ctx := context.Background()
 	t.Run("sad/a refused signal closes the session and says it may still run", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseSignal: true})
 		c := testClient()
 		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
@@ -419,7 +420,7 @@ func TestCommandFaults(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("raging/refused TERM and KILL end with a closed session that may still run", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseSignal: true})
 		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 2 * time.Second, KillWait: 2 * time.Second})
 		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
@@ -452,7 +453,7 @@ func TestCommandFaults(t *testing.T) {
 		{"raging/a server that never answers a channel open", sshtest.Options{SilentChannelOpen: true}, CodeTimeout},
 	} {
 		t.Run(cs.name, func(t *testing.T) {
-			checkLeaks(t)
+			leakcheck.Check(t)
 			tg := newSSHTest(t, cs.opts)
 			c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: 300 * time.Millisecond})
 			o := c.Options()
@@ -472,7 +473,7 @@ func TestCommandFaults(t *testing.T) {
 		})
 	}
 	t.Run("raging/a caller's Signal to a server that never answers", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{SilentSignal: true})
 		c := New(Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: 300 * time.Millisecond})
 		cmd, err := c.Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
@@ -493,7 +494,7 @@ func TestCommandFaults(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("edge/the connect timeout bounds a silent exec without a caller deadline", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{SilentExec: true})
 		c := New(Options{ConnectTimeout: 300 * time.Millisecond})
 		st, err := c.Exec(ctx, tg.tid, tg.srv, "true", nil, nil)
@@ -501,8 +502,23 @@ func TestCommandFaults(t *testing.T) {
 			t.Fatalf("status %+v err %v", st, err)
 		}
 	})
+	t.Run("edge/Start's error after a silent exec says the command may still run", func(t *testing.T) {
+		leakcheck.Check(t)
+		tg := newSSHTest(t, sshtest.Options{SilentExec: true})
+		c := New(Options{ConnectTimeout: 300 * time.Millisecond})
+		_, err := c.Start(ctx, tg.tid, tg.srv, "true", nil, nil)
+		var e *Error
+		if !errors.As(err, &e) || !e.MayStillRun() {
+			t.Fatalf("err %v", err)
+		}
+		tg2 := newSSHTest(t, sshtest.Options{RefuseKey: true})
+		_, err = c.Start(ctx, tg2.tid, tg2.srv, "true", nil, nil)
+		if !errors.As(err, &e) || e.MayStillRun() {
+			t.Fatalf("a refused key says may still run: %v", err)
+		}
+	})
 	t.Run("sad/an output writer that fails after an exit 0", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
@@ -519,7 +535,7 @@ func TestCommandFaults(t *testing.T) {
 		}
 	})
 	t.Run("edge/no exit status", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{NoExitStatus: true})
 		st, err := testClient().Exec(ctx, tg.tid, tg.srv, "true", nil, nil)
 		if err != nil || st.Outcome != OutcomeNoStatus || !st.MayStillRun {
@@ -528,7 +544,7 @@ func TestCommandFaults(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("raging/the connection drops mid-stream", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{DropMidStream: true})
 		out := newNotifyBuffer()
 		st, err := testClient().Exec(ctx, tg.tid, tg.srv, "echo first; sleep 300", out, nil)
@@ -540,7 +556,7 @@ func TestCommandFaults(t *testing.T) {
 		}
 	})
 	t.Run("sad/an unknown signal name is refused locally", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
 		if err != nil {
@@ -566,7 +582,7 @@ func TestCommandFaults(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("corner/concurrent Signal and Wait", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
 		if err != nil {
@@ -598,7 +614,7 @@ func TestCommandFaults(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("corner/two Waits with ending contexts run one stop sequence", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		cmd, err := testClient().Start(ctx, tg.tid, tg.srv, "sleep 300", nil, nil)
 		if err != nil {
@@ -662,7 +678,7 @@ func TestProbeParsing(t *testing.T) {
 		}
 	})
 	t.Run("sad/the probe fails when the command does not exit 0", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{NoExitStatus: true})
 		if _, err := testClient().Probe(context.Background(), tg.tid, tg.srv); CodeOf(err) != CodeInternal || !strings.Contains(err.Error(), "no_status") {
 			t.Fatalf("err = %v", err)
@@ -702,7 +718,7 @@ func TestSFTPFaults(t *testing.T) {
 		}
 	})
 	t.Run("sad/connect errors", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{RefuseKey: true})
 		c := testClient()
 		if _, _, _, err := c.Download(ctx, tg.tid, tg.srv, "/x", 0, 1); !errors.Is(err, CodeAuthFailed) {
@@ -713,7 +729,7 @@ func TestSFTPFaults(t *testing.T) {
 		}
 	})
 	t.Run("sad/a context cancelled before the SFTP session", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		cctx, cancel := context.WithCancel(ctx)
 		cancel()
@@ -722,7 +738,7 @@ func TestSFTPFaults(t *testing.T) {
 		}
 	})
 	t.Run("sad/the server refuses the sftp subsystem", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{NoSFTP: true})
 		_, _, _, err := testClient().Download(ctx, tg.tid, tg.srv, "/x", 0, 1)
 		if CodeOf(err) != CodeInternal || !strings.Contains(err.Error(), "SFTP subsystem") {
@@ -741,7 +757,7 @@ func TestSFTPFaults(t *testing.T) {
 		}
 	})
 	t.Run("corner/a context that ends mid-transfer", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		c := testClient()
 		big := make([]byte, 64<<20)
@@ -764,7 +780,7 @@ func TestSFTPFaults(t *testing.T) {
 		waitNoConns(t, tg)
 	})
 	t.Run("corner/overwrite without posix-rename writes in place", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		if err := sftp.SetSFTPExtensions("statvfs@openssh.com"); err != nil {
 			t.Fatal(err)
 		}
@@ -799,7 +815,7 @@ func TestSFTPFaults(t *testing.T) {
 		}
 	})
 	t.Run("sad/posix-rename onto a directory fails and leaves no temp file", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		d := filepath.Join(tg.dir, "adir")
 		if err := os.MkdirAll(filepath.Join(d, "child"), 0o700); err != nil {
@@ -817,7 +833,7 @@ func TestSFTPFaults(t *testing.T) {
 		}
 	})
 	t.Run("sad/an exclusive create leaves an existing file alone", func(t *testing.T) {
-		checkLeaks(t)
+		leakcheck.Check(t)
 		tg := newSSHTest(t, sshtest.Options{})
 		p := filepath.Join(tg.dir, "keep")
 		if err := os.WriteFile(p, []byte("keep"), 0o600); err != nil {

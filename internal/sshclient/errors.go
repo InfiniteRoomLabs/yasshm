@@ -84,6 +84,11 @@ func (e *Error) Error() string {
 // Code returns the error's code.
 func (e *Error) Code() Code { return e.code }
 
+// MayStillRun reports whether the command may be running on the target
+// although the operation failed: Start gave up on a server that stopped
+// answering after the exec request was sent. The job engine records it.
+func (e *Error) MayStillRun() bool { return e.mayRun }
+
 // Server returns the id of the server the operation was for.
 func (e *Error) Server() tenant.ServerID { return e.server }
 

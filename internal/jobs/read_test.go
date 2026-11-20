@@ -14,6 +14,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/store"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
 
 func TestReadOutput(t *testing.T) {
@@ -422,23 +423,28 @@ func TestJanitor(t *testing.T) {
 			t.Fatalf("the running command was touched: %v %+v", err, g)
 		}
 	})
-	t.Run("happy/above max_data_bytes the oldest finished go first, per tenant", func(t *testing.T) {
+	t.Run("happy/a finishing command wakes the janitor: the oldest finished go first, per tenant, without a Sweep call", func(t *testing.T) {
 		t.Parallel()
-		h := newHarness(t, withLimits(func(l *tenant.Limits) { l.MaxDataBytes = 25; l.MaxOutputBytes = 10 }))
+		const cmd = "printf 0123456789"
+		per := int64(10 + len(cmd) + store.RowCost) // one finished record's usage
+		h := newHarness(t, withLimits(func(l *tenant.Limits) { l.MaxDataBytes = 2*per + 10; l.MaxOutputBytes = 10 }))
 		t0 := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
 		var ids []tenant.CommandID
 		for i := range 4 {
 			h.setClock(t0.Add(time.Duration(i) * time.Minute))
-			ids = append(ids, h.wait(h.start("printf 0123456789", StartOptions{}).ID).ID)
+			ids = append(ids, h.wait(h.start(cmd, StartOptions{}).ID).ID)
+			if i >= 2 {
+				old := ids[i-2]
+				if !leakcheck.Poll(10*time.Second, func() bool { _, err := h.e.Get(t.Context(), tA, old); return CodeOf(err) == CodeNotFound }) {
+					t.Fatalf("command %d was not deleted after command %d finished", i-2, i)
+				}
+			}
 		}
-		rb, err := h.e.Start(t.Context(), tB, h.actorB, "srv-1", "printf 0123456789", StartOptions{})
+		rb, err := h.e.Start(t.Context(), tB, h.actorB, "srv-1", cmd, StartOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := h.e.Wait(t.Context(), tB, rb.ID, 30*time.Second); err != nil {
-			t.Fatal(err)
-		}
-		if err := h.e.Sweep(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		for i, id := range ids {
@@ -464,6 +470,9 @@ func TestJanitor(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(h.dir, "tenants", "README"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.e.Shutdown(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		e2 := h.open()
@@ -499,7 +508,7 @@ func TestJanitor(t *testing.T) {
 			t.Fatal(err)
 		}
 		h.setClock(t0.Add(2 * day))
-		if !poll(10*time.Second, func() bool { _, err := e.Get(t.Context(), tA, r.ID); return CodeOf(err) == CodeNotFound }) {
+		if !leakcheck.Poll(10*time.Second, func() bool { _, err := e.Get(t.Context(), tA, r.ID); return CodeOf(err) == CodeNotFound }) {
 			t.Fatal("the janitor did not run")
 		}
 	})

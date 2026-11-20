@@ -17,6 +17,7 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/sshclient"
 	"github.com/InfiniteRoomLabs/yasshm/internal/store"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
 
@@ -83,7 +84,7 @@ func TestStatuses(t *testing.T) {
 		if r.Status != StatusTimedOut || r.Signal != "TERM" || r.MayStillRun {
 			t.Fatalf("%+v", r)
 		}
-		if poll(5*time.Second, func() bool { return h.sa.Running() == 0 }) == false {
+		if leakcheck.Poll(5*time.Second, func() bool { return h.sa.Running() == 0 }) == false {
 			t.Fatal("the remote command still runs")
 		}
 	})
@@ -381,9 +382,11 @@ func TestRecover(t *testing.T) {
 		if _, err := h.e.ReadOutput(t.Context(), tA, r.ID, ReadRequest{Stream: StreamStdout, Wait: 10 * time.Second}); err != nil {
 			t.Fatal(err)
 		}
-		// The first engine is dropped without Shutdown (its cleanup stops
-		// it at the end of the test); a second one opens the same data
-		// directory, as a restarted gateway would.
+		// The first engine dies without Shutdown: its store is closed (its
+		// lock released, so nothing it does later reaches the database) and
+		// its goroutines are left to the test's cleanup. A second one opens
+		// the same data directory, as a restarted gateway would.
+		_ = h.e.st.Close(t.Context())
 		e2 := h.open()
 		got, err := e2.Get(t.Context(), tA, r.ID)
 		if err != nil || got.Status != StatusLost || got.FinishedAt.IsZero() || !got.MayStillRun || got.StoredBytes != 8 {
@@ -409,10 +412,8 @@ func TestRecover(t *testing.T) {
 			t.Fatalf("Recover after a start: %v", err)
 		}
 		// The first engine's command ends at its shutdown; its record stays
-		// lost, because a finished record never changes.
-		if err := h.e.Shutdown(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		// lost.
+		_ = h.e.Shutdown(t.Context())
 		if got, _ := e2.Get(t.Context(), tA, r.ID); got.Status != StatusLost {
 			t.Fatalf("%+v", got)
 		}
@@ -464,7 +465,7 @@ func TestShutdown(t *testing.T) {
 		if h.sa.Conns() != 0 || h.sb.Conns() != 0 {
 			t.Fatalf("connections left: %d %d", h.sa.Conns(), h.sb.Conns())
 		}
-		if !poll(5*time.Second, func() bool { return h.sa.Running() == 0 && h.sb.Running() == 0 }) {
+		if !leakcheck.Poll(5*time.Second, func() bool { return h.sa.Running() == 0 && h.sb.Running() == 0 }) {
 			t.Fatal("remote commands still run")
 		}
 		h.noSlots(h.e)
@@ -503,7 +504,7 @@ func TestShutdown(t *testing.T) {
 		h.start("sleep 30", StartOptions{})
 		first := make(chan error, 1)
 		go func() { first <- h.e.Shutdown(context.Background()) }()
-		if !poll(5*time.Second, func() bool { h.e.mu.Lock(); defer h.e.mu.Unlock(); return h.e.closing }) {
+		if !leakcheck.Poll(5*time.Second, func() bool { h.e.mu.Lock(); defer h.e.mu.Unlock(); return h.e.closing }) {
 			t.Fatal("shutdown did not start")
 		}
 		ctx, cancel := context.WithCancel(t.Context())
@@ -520,7 +521,7 @@ func TestShutdown(t *testing.T) {
 func TestNew(t *testing.T) {
 	t.Parallel()
 	base := func(t *testing.T) Config {
-		return Config{DataDir: privDir(t), Audit: &failAudit{fail: map[string]bool{}}}
+		return Config{DataDir: leakcheck.PrivDir(t), Audit: &failAudit{fail: map[string]bool{}}}
 	}
 	t.Run("sad/bad configurations are refused", func(t *testing.T) {
 		t.Parallel()

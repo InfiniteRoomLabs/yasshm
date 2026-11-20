@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/realsshd"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
@@ -168,7 +169,7 @@ var scenarios = []scenario{
 		<-w.entered
 		// With the writer blocked, the SSH window stops the remote side
 		// long before 16 MB: the marker must not appear.
-		if poll(500*time.Millisecond, func() bool { _, serr := os.Stat(marker); return serr == nil }) {
+		if leakcheck.Poll(500*time.Millisecond, func() bool { _, serr := os.Stat(marker); return serr == nil }) {
 			close(w.release)
 			_ = cmd.Close()
 			t.Fatal("the command finished while the writer was blocked: output was buffered without bound")
@@ -231,7 +232,7 @@ var scenarios = []scenario{
 		if st.Outcome != OutcomeSignaled || st.Signal != "TERM" || st.KillSent {
 			t.Fatalf("status %+v", st)
 		}
-		if !poll(5*time.Second, func() bool { return !alive(pid) }) {
+		if !leakcheck.Poll(5*time.Second, func() bool { return !alive(pid) }) {
 			t.Fatalf("child %d survived TERM to its process group", pid)
 		}
 	}},
@@ -246,7 +247,7 @@ var scenarios = []scenario{
 		cmd, pid := startWithPid(t, tg, c, "setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $!; sleep 300")
 		// $! is printed before the child has called setsid(); stop only
 		// once it leads its own process group.
-		if !poll(5*time.Second, func() bool { return pgid(pid) == pid }) {
+		if !leakcheck.Poll(5*time.Second, func() bool { return pgid(pid) == pid }) {
 			t.Fatalf("pid %d never left the process group (pgid %d)", pid, pgid(pid))
 		}
 		ctx, cancel := context.WithCancel(context.Background())
@@ -263,7 +264,7 @@ var scenarios = []scenario{
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 			t.Fatal(err)
 		}
-		if !poll(5*time.Second, func() bool { return !alive(pid) }) {
+		if !leakcheck.Poll(5*time.Second, func() bool { return !alive(pid) }) {
 			t.Fatalf("could not clean up pid %d", pid)
 		}
 	}},
@@ -303,7 +304,7 @@ var scenarios = []scenario{
 		}
 		// Observe for a second whether anything on the server side ends
 		// the command once its connection is gone.
-		died := poll(time.Second, func() bool { return !alive(pid) })
+		died := leakcheck.Poll(time.Second, func() bool { return !alive(pid) })
 		t.Logf("F10 observed (%s): after the client closed the connection the command was still running: %v", tg.banner, !died)
 		if died {
 			t.Fatalf("pid %d ended when the session closed; F10 says closing does not stop a command", pid)
@@ -534,7 +535,7 @@ var scenarios = []scenario{
 			t.Fatal(err)
 		}
 		srv := *tg.srv
-		srv.HostKey = keyLine(pk)
+		srv.HostKey = sshtest.KeyLine(pk)
 		_, err = c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
 		if !errors.Is(err, CodeHostKeyMismatch) {
 			t.Fatalf("err = %v", err)
@@ -545,7 +546,7 @@ var scenarios = []scenario{
 		kh := filepath.Join(t.TempDir(), "known_hosts")
 		hostPat := "[" + tg.srv.Host + "]:" + strconv.Itoa(tg.srv.Port)
 		other := otherHostKey(t)
-		text := hostPat + " " + other + "\n" + hostPat + " " + keyLine(tg.hostKey) + "\n"
+		text := hostPat + " " + other + "\n" + hostPat + " " + sshtest.KeyLine(tg.hostKey) + "\n"
 		if err := os.WriteFile(kh, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -554,7 +555,7 @@ var scenarios = []scenario{
 		if _, err := c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(kh, []byte(text+"@revoked * "+keyLine(tg.hostKey)+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(kh, []byte(text+"@revoked * "+sshtest.KeyLine(tg.hostKey)+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_, err := c.Exec(context.Background(), tg.tid, &srv, "true", nil, nil)
@@ -618,7 +619,7 @@ func checkFile(t *testing.T, p, content string, mode fs.FileMode) {
 func runContract(t *testing.T, mk func(t *testing.T) target) {
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
-			checkLeaks(t)
+			leakcheck.Check(t)
 			tg := mk(t)
 			// Registered after the server, so it runs before the server's
 			// own cleanup (which kills survivors) and after the scenario's.

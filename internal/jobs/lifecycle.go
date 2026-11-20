@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,10 +23,11 @@ import (
 // refuses (a record running now belongs to this engine). It returns how many
 // records it marked.
 func (e *Engine) Recover(ctx context.Context) (int, error) {
+	// The engine lock is held across the check and the update, so a first
+	// Start cannot insert a record that this call then marks lost.
 	e.mu.Lock()
-	started := e.started
-	e.mu.Unlock()
-	if started {
+	if e.started {
+		e.mu.Unlock()
 		return 0, internal("recover runs only before the first command starts", nil)
 	}
 	recs, err := e.st.RecoverAllTenants(ctx, e.now(), func(r *store.Record) (int64, int64) {
@@ -37,6 +40,7 @@ func (e *Engine) Recover(ctx context.Context) (int, error) {
 		e.report(errors.Join(err1, err2))
 		return so, se
 	})
+	e.mu.Unlock()
 	if err != nil {
 		return 0, internal("could not recover the command records", err)
 	}
@@ -125,13 +129,17 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 		}
 		<-all
 	}
+	e.report(e.flushPending(context.WithoutCancel(ctx)))
 	e.storeClosed.Store(true)
 	e.shutdownErr = e.st.Close(context.WithoutCancel(ctx))
 	close(e.shutdownDone)
 	return e.shutdownErr
 }
 
-// janitor runs Sweep at start and every JanitorInterval until Shutdown.
+// janitor runs Sweep at start, every JanitorInterval and whenever a command
+// finishes, until Shutdown. A finishing command wakes it, so a tenant's data
+// passes max_data_bytes by at most max_concurrent_commands x
+// max_output_bytes between passes.
 func (e *Engine) janitor() {
 	defer close(e.janitorDone)
 	t := time.NewTicker(e.cfg.JanitorInterval)
@@ -142,25 +150,54 @@ func (e *Engine) janitor() {
 		case <-e.janitorStop:
 			return
 		case <-t.C:
+		case <-e.wake:
 		}
 	}
+}
+
+// flushPending retries the store writes of command ends this engine could
+// not record; a record that has already finished is dropped from the list.
+func (e *Engine) flushPending(ctx context.Context) error {
+	e.mu.Lock()
+	keys := slices.Collect(maps.Keys(e.pending))
+	e.mu.Unlock()
+	var errs []error
+	for _, k := range keys {
+		e.mu.Lock()
+		p := e.pending[k]
+		e.mu.Unlock()
+		err := e.hooks().finishRow(ctx, k.tid, k.id, p.f)
+		if err != nil && !errors.Is(err, store.ErrNotRunning) && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("jobs: janitor: record the end of command %s: %w", k.id, err))
+			continue
+		}
+		e.mu.Lock()
+		delete(e.pending, k)
+		e.mu.Unlock()
+	}
+	return errors.Join(errs...)
 }
 
 // janitorBatch is how many records the janitor reads at once.
 const janitorBatch = 100
 
-// Sweep is one janitor pass (the janitor runs it at start and every
-// JanitorInterval). Per tenant it deletes the finished commands whose
-// finished_at is older than retention_days, then, while the tenant's stored
-// output exceeds max_data_bytes, the oldest finished commands first. It
-// deletes the record first and then the output directory, and never touches
-// a running command or another tenant's data.
+// Sweep is one janitor pass (the janitor runs it at start, every
+// JanitorInterval and when a command finishes). Per tenant it deletes the
+// finished commands whose finished_at is older than retention_days, then,
+// while the tenant's usage (stored output, command text and store.RowCost
+// per record, plus what running commands have stored) exceeds
+// max_data_bytes, the oldest finished commands first. It deletes the record
+// first and then the output directory; when the record cannot be deleted (a
+// full disk), it deletes the directory first to free space and tries the
+// record again. It never touches a running command or another tenant's data.
+// Then it removes output directories that have no record, and retries the
+// store writes of command ends that failed.
 func (e *Engine) Sweep(ctx context.Context) error {
 	if err := e.usable(); err != nil {
 		return err
 	}
 	var errs []error
-	for _, tid := range e.sortedTenants() {
+	for _, tid := range slices.Sorted(maps.Keys(e.tenants)) {
 		lim := e.tenants[tid].t.Limits
 		cutoff := e.now().Add(-time.Duration(lim.RetentionDays) * 24 * time.Hour)
 		for {
@@ -173,12 +210,12 @@ func (e *Engine) Sweep(ctx context.Context) error {
 				break
 			}
 		}
-		used, err := e.st.StoredBytes(ctx, tid)
+		used, err := e.usedBytes(ctx, tid)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		used += e.liveStored(tid)
+	quota:
 		for used > lim.MaxDataBytes {
 			recs, err := e.st.OldestFinished(ctx, tid, janitorBatch)
 			if err != nil {
@@ -188,36 +225,54 @@ func (e *Engine) Sweep(ctx context.Context) error {
 			if len(recs) == 0 {
 				break
 			}
-			var n int
 			for i := range recs {
-				if used <= lim.MaxDataBytes {
-					break
+				if used <= lim.MaxDataBytes || !e.deleteAll(ctx, tid, recs[i:i+1], &errs) {
+					break quota
 				}
-				if !e.deleteAll(ctx, tid, recs[i:i+1], &errs) {
-					break
-				}
-				used -= recs[i].StoredBytes
-				n++
-			}
-			if n < len(recs) && used > lim.MaxDataBytes {
-				break // a deletion failed; try again next pass
+				used -= recs[i].StoredBytes + int64(len(recs[i].Command)) + store.RowCost
 			}
 		}
 	}
+	e.sweepOrphans(ctx)
+	errs = append(errs, e.flushPending(ctx))
 	return errors.Join(errs...)
 }
 
-// deleteAll deletes each finished record and then its output directory. It
-// returns false when a deletion failed.
+// usedBytes is the tenant's usage against max_data_bytes: what the store
+// counts (finished output, command text, a fixed cost per record), then the
+// output running commands have stored so far. The store is read first, so a
+// command that finishes between the two reads is counted at most once.
+func (e *Engine) usedBytes(ctx context.Context, tid tenant.TenantID) (int64, error) {
+	if err := e.usable(); err != nil {
+		return 0, err
+	}
+	n, err := e.st.UsedBytes(ctx, tid)
+	if err != nil {
+		return 0, err
+	}
+	return n + e.liveStored(tid), nil
+}
+
+// deleteAll deletes each finished record and then its output directory. A
+// record that cannot be deleted gets its directory deleted first (freeing
+// space on a full disk) and one more try. It returns false when a deletion
+// failed.
 func (e *Engine) deleteAll(ctx context.Context, tid tenant.TenantID, recs []Record, errs *[]error) bool {
 	for i := range recs {
 		id := recs[i].ID
-		if err := e.st.DeleteFinished(ctx, tid, id); err != nil {
+		dir, derr := commandDir(e.cfg.DataDir, tid, id)
+		err := e.hooks().deleteRow(ctx, tid, id)
+		if err != nil && derr == nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrRunning) {
+			if rerr := os.RemoveAll(dir); rerr != nil {
+				*errs = append(*errs, fmt.Errorf("jobs: janitor: delete output %s: %w", id, rerr))
+			}
+			err = e.hooks().deleteRow(ctx, tid, id)
+		}
+		if err != nil {
 			*errs = append(*errs, fmt.Errorf("jobs: janitor: delete record %s: %w", id, err))
 			return false
 		}
-		dir, err := commandDir(e.cfg.DataDir, tid, id)
-		if err != nil {
+		if derr != nil {
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {
@@ -228,25 +283,30 @@ func (e *Engine) deleteAll(ctx context.Context, tid tenant.TenantID, recs []Reco
 }
 
 // liveStored returns the bytes stored so far by the tenant's running
-// commands.
+// commands. The jobs are copied out under the engine lock and read outside
+// it, so the engine lock is never held while a capture lock is awaited.
 func (e *Engine) liveStored(tid tenant.TenantID) int64 {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	var n int64
+	var js []*job
 	for k, j := range e.jobs {
 		if k.tid == tid {
-			n += j.cap.snapshot().stored
+			js = append(js, j)
 		}
+	}
+	e.mu.Unlock()
+	var n int64
+	for _, j := range js {
+		n += j.cap.snapshot().stored
 	}
 	return n
 }
 
 // sweepOrphans removes output directories that have no record (left when a
-// gateway died between deleting a record and its files). It runs once in
-// New, before any command starts; names that are not valid ids are left
-// alone and reported.
-func (e *Engine) sweepOrphans() {
-	ctx := e.root
+// gateway died between deleting a record and its files, or when a directory
+// could not be deleted). It runs in New and in every Sweep: a record is always
+// inserted before its directory is created, so a running command's directory
+// is never taken. Names that are not valid ids are left alone and reported.
+func (e *Engine) sweepOrphans(ctx context.Context) {
 	base := filepath.Join(e.cfg.DataDir, tenantsDir)
 	tdirs, err := os.ReadDir(base)
 	if err != nil {

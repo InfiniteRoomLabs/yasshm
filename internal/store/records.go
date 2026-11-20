@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,12 +44,7 @@ var transitions = map[Status][]Status{
 
 // CanTransition reports whether a record in status from may go to status to.
 func CanTransition(from, to Status) bool {
-	for _, s := range transitions[from] {
-		if s == to {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(transitions[from], to)
 }
 
 // Valid reports whether s is one of the seven statuses.
@@ -407,16 +403,24 @@ func (s *Store) OldestFinished(ctx context.Context, tid tenant.TenantID, limit i
 	return s.FinishedBefore(ctx, tid, time.UnixMicro(1<<62), limit)
 }
 
-// StoredBytes returns the sum of stored_bytes over the tenant's records.
-// A running record counts what was stored when it last changed (0 until it
-// finishes); the engine adds its live counts.
-func (s *Store) StoredBytes(ctx context.Context, tid tenant.TenantID) (int64, error) {
+// RowCost is what one record counts against a tenant's max_data_bytes on
+// top of its command text and its stored output: an estimate of a row with
+// its index entries, so records without output are not free.
+const RowCost = 256
+
+// UsedBytes returns the tenant's usage as max_data_bytes counts it: for every
+// record its command text and RowCost, and for every finished record its
+// stored output. A running record's output is not counted here (it is 0
+// until the record finishes); the engine adds its live counts.
+func (s *Store) UsedBytes(ctx context.Context, tid tenant.TenantID) (int64, error) {
 	if !ValidTenantID(tid) {
 		return 0, ErrInvalid
 	}
 	var n int64
-	if err := s.db.QueryRowContext(ctx, `SELECT coalesce(sum(stored_bytes), 0) FROM commands WHERE tenant = ?`, tid).Scan(&n); err != nil {
-		return 0, fmt.Errorf("store: stored bytes: %w", err)
+	err := s.db.QueryRowContext(ctx, `SELECT coalesce(sum(length(CAST(command AS BLOB)) + ?
+		+ CASE WHEN status = 'running' THEN 0 ELSE stored_bytes END), 0) FROM commands WHERE tenant = ?`, RowCost, tid).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: used bytes: %w", err)
 	}
 	return n, nil
 }

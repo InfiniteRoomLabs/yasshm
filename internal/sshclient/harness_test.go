@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/realsshd"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
@@ -57,10 +57,6 @@ func (tg target) full() *tenant.Server {
 	return &srv
 }
 
-func keyLine(pk ssh.PublicKey) string {
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk)))
-}
-
 // newSSHTest starts an in-process server and the tenant.Server for it.
 func newSSHTest(t *testing.T, o sshtest.Options) target {
 	t.Helper()
@@ -73,7 +69,7 @@ func newSSHTest(t *testing.T, o sshtest.Options) target {
 			Host:     s.Host,
 			Port:     s.Port,
 			Identity: tenant.Identity{ID: "look", User: s.User, PrivateKeyFile: s.ClientKeyFile},
-			HostKey:  keyLine(s.HostKey),
+			HostKey:  sshtest.KeyLine(s.HostKey),
 			Access:   tenant.AccessLook,
 		},
 		dir:     s.Root,
@@ -106,7 +102,7 @@ func newReal(t *testing.T) target {
 			Host:     s.Host,
 			Port:     s.Port,
 			Identity: tenant.Identity{ID: "look", User: s.User, PrivateKeyFile: s.ClientKeyFile},
-			HostKey:  keyLine(s.HostKey),
+			HostKey:  sshtest.KeyLine(s.HostKey),
 			Access:   tenant.AccessLook,
 		},
 		dir:       t.TempDir(),
@@ -128,74 +124,9 @@ func waitNoConns(t *testing.T, tg target) {
 	if tg.conns == nil {
 		return
 	}
-	if !poll(5*time.Second, func() bool { return tg.conns() == 0 }) {
+	if !leakcheck.Poll(5*time.Second, func() bool { return tg.conns() == 0 }) {
 		t.Errorf("%d connections still open on the server", tg.conns())
 	}
-}
-
-// poll calls cond every 10ms until it is true or d passes.
-func poll(d time.Duration, cond func() bool) bool {
-	deadline := time.Now().Add(d)
-	for {
-		if cond() {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		runtime.Gosched()
-		time.Sleep(10 * time.Millisecond) // the polling interval of a deadline-bounded poll
-	}
-}
-
-// goroutines returns the stacks, by goroutine id, of the goroutines that
-// belong to this module, x/crypto/ssh or pkg/sftp and are not test
-// goroutines.
-func goroutines() map[string]string {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-	out := map[string]string{}
-	for _, g := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(g, "testing.tRunner") || strings.Contains(g, "testing.(*T).Run") || strings.Contains(g, "testing.runCleanup") {
-			continue
-		}
-		if !strings.Contains(g, "InfiniteRoomLabs/yasshm/") && !strings.Contains(g, "golang.org/x/crypto/ssh") && !strings.Contains(g, "github.com/pkg/sftp") {
-			continue
-		}
-		head, _, _ := strings.Cut(g, "\n")
-		out[strings.Fields(head + " x x")[1]] = g
-	}
-	return out
-}
-
-// checkLeaks registers a cleanup, run after every later cleanup (the
-// servers' Close included), that fails when a goroutine of the client or
-// server outlived the test.
-func checkLeaks(t *testing.T) {
-	t.Helper()
-	base := goroutines()
-	t.Cleanup(func() {
-		var leaked []string
-		ok := poll(5*time.Second, func() bool {
-			leaked = leaked[:0]
-			for id, g := range goroutines() {
-				if _, old := base[id]; !old {
-					leaked = append(leaked, g)
-				}
-			}
-			return len(leaked) == 0
-		})
-		if !ok {
-			t.Errorf("%d goroutines leaked:\n%s", len(leaked), strings.Join(leaked, "\n\n"))
-		}
-	})
 }
 
 // currentUser returns the login name of the test process.
@@ -319,7 +250,7 @@ func otherHostKey(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return keyLine(pk)
+	return sshtest.KeyLine(pk)
 }
 
 // checkNoLeftovers registers a cleanup, run after every later cleanup, that
@@ -331,7 +262,7 @@ func checkNoLeftovers(t *testing.T, tg *target) {
 			return
 		}
 		var left []int
-		if !poll(5*time.Second, func() bool { left = tg.leftovers(); return len(left) == 0 }) {
+		if !leakcheck.Poll(5*time.Second, func() bool { left = tg.leftovers(); return len(left) == 0 }) {
 			t.Errorf("processes left behind: %v", left)
 		}
 	})

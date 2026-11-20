@@ -7,17 +7,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/sshclient"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
+	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/sshtest"
 )
 
@@ -40,12 +38,10 @@ func testSSH(tenant.Limits) sshclient.Options {
 	return sshclient.Options{ConnectTimeout: 5 * time.Second, KillGrace: 300 * time.Millisecond, KillWait: time.Second}
 }
 
-func keyLine(pk ssh.PublicKey) string { return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pk))) }
-
 // serverFor describes an sshtest server as a server of tid.
 func serverFor(tid tenant.TenantID, sid tenant.ServerID, s *sshtest.Server) tenant.Server {
 	return tenant.Server{
-		Tenant: tid, ID: sid, Host: s.Host, Port: s.Port, Access: tenant.AccessLook, HostKey: keyLine(s.HostKey),
+		Tenant: tid, ID: sid, Host: s.Host, Port: s.Port, Access: tenant.AccessLook, HostKey: s.HostKeyLine(),
 		Identity: tenant.Identity{ID: "look", User: s.User, PrivateKeyFile: s.ClientKeyFile},
 	}
 }
@@ -161,13 +157,21 @@ func withServer(o sshtest.Options) opt {
 	}
 }
 
+// newCheckedHarness is newHarness with a goroutine leak check that runs
+// after every cleanup. The check sees every goroutine of the process, so it
+// is used only in tests that do not run in parallel with others (TestLeaks).
+func newCheckedHarness(t *testing.T, opts ...opt) *harness {
+	t.Helper()
+	leakcheck.Check(t)
+	return newHarness(t, opts...)
+}
+
 func newHarness(t *testing.T, opts ...opt) *harness {
 	t.Helper()
-	checkLeaks(t)
-	h := &harness{t: t, dir: privDir(t)}
+	h := &harness{t: t, dir: leakcheck.PrivDir(t)}
 	h.sa = sshtest.Start(t, sshtest.Options{})
 	h.sb = sshtest.Start(t, sshtest.Options{})
-	logPath := filepath.Join(privDir(t), "audit.jsonl")
+	logPath := filepath.Join(leakcheck.PrivDir(t), "audit.jsonl")
 	l, err := audit.Open(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -281,78 +285,6 @@ func (h *harness) noSlots(e *Engine) {
 }
 
 func boolp(b bool) *bool { return &b }
-
-// privDir returns a new 0700 directory.
-func privDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: a directory needs the x bit; 0700 is the mode under test
-		t.Fatal(err)
-	}
-	return dir
-}
-
-// poll calls cond every 10ms until it is true or d passes.
-func poll(d time.Duration, cond func() bool) bool {
-	deadline := time.Now().Add(d)
-	for {
-		if cond() {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond) // the polling interval of a deadline-bounded poll
-	}
-}
-
-// goroutines returns the stacks, by goroutine id, of the goroutines of this
-// module and x/crypto/ssh that are not test goroutines.
-func goroutines() map[string]string {
-	buf := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			buf = buf[:n]
-			break
-		}
-		buf = make([]byte, 2*len(buf))
-	}
-	out := map[string]string{}
-	for _, g := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(g, "testing.tRunner") || strings.Contains(g, "testing.(*T).Run") || strings.Contains(g, "testing.runCleanup") {
-			continue
-		}
-		if !strings.Contains(g, "InfiniteRoomLabs/yasshm/") && !strings.Contains(g, "golang.org/x/crypto/ssh") {
-			continue
-		}
-		head, _, _ := strings.Cut(g, "\n")
-		out[strings.Fields(head + " x x")[1]] = g
-	}
-	return out
-}
-
-// checkLeaks fails the test when a goroutine started during it outlives
-// every later cleanup (the engines' Shutdown and the servers' Close).
-func checkLeaks(t *testing.T) {
-	t.Helper()
-	base := goroutines()
-	t.Cleanup(func() {
-		var leaked []string
-		ok := poll(5*time.Second, func() bool {
-			leaked = leaked[:0]
-			for id, g := range goroutines() {
-				if _, old := base[id]; !old {
-					leaked = append(leaked, g)
-				}
-			}
-			return len(leaked) == 0
-		})
-		if !ok {
-			t.Errorf("%d goroutines leaked:\n%s", len(leaked), strings.Join(leaked, "\n\n"))
-		}
-	})
-}
 
 // procFD lists this process's open files.
 const procFD = "/proc/self/fd"

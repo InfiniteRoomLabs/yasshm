@@ -28,10 +28,13 @@ const (
 // Error returns the code itself.
 func (c Code) Error() string { return string(c) }
 
-// The names of the two concurrency limits, as Error.Limit reports them.
+// The names of the limits a busy error names, as Error.Limit reports them.
 const (
 	LimitPerTenant = "max_concurrent_commands"
 	LimitPerServer = "max_concurrent_per_server"
+	// LimitData: the tenant's stored output and records reached
+	// max_data_bytes; the janitor frees space as commands finish.
+	LimitData = "max_data_bytes"
 )
 
 // Sentinels an *Error can also match with errors.Is.
