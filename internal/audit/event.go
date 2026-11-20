@@ -75,6 +75,7 @@ type record struct {
 	Overwrite      *bool     `json:"overwrite,omitempty"`
 	Version        string    `json:"version,omitempty"`
 	Listen         string    `json:"listen,omitempty"`
+	Count          *int64    `json:"count,omitempty"`
 }
 
 // Actor is who caused an event: the request it came in and the verified
@@ -178,6 +179,20 @@ func AuthAccepted(requestID string, p tenant.Principal) Event {
 func AuthRejected(requestID string, reason RejectReason, p tenant.Principal) Event {
 	r := Actor{RequestID: requestID, Principal: p}.record(EventAuthRejected)
 	r.Decision, r.Reason = "deny", reason.s
+	return Event{r}
+}
+
+// ReasonSuppressed is the reason of the one auth.rejected event that counts
+// rejections not written individually (AuthRejectionsSuppressed). It is not
+// a RejectReason: no single rejection carries it.
+const ReasonSuppressed = "suppressed"
+
+// AuthRejectionsSuppressed records that count rejections were answered but
+// not written one by one, because the per-minute allowance for rejections
+// made before a signature was verified ran out (spec 5.7). It is the only
+// event with a count field.
+func AuthRejectionsSuppressed(count int64) Event {
+	r := record{Event: EventAuthRejected, Decision: "deny", Reason: ReasonSuppressed, Count: &count}
 	return Event{r}
 }
 

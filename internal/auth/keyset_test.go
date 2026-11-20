@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -18,15 +19,6 @@ import (
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/accesstest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
-
-func randomKid(t *testing.T) string {
-	t.Helper()
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
-	}
-	return hex.EncodeToString(b)
-}
 
 // TestRefetchLimit: a thousand tokens with random kids cause at most one
 // fetch per minute of the injected clock.
@@ -37,7 +29,7 @@ func TestRefetchLimit(t *testing.T) {
 	user := f.is.User(userEmail)
 	tokens := make([]string, 1000)
 	for i := range tokens {
-		tokens[i] = user.Header("kid", randomKid(t)).Sign()
+		tokens[i] = user.Header("kid", rand.Text()).Sign()
 	}
 	run := func(t *testing.T) {
 		t.Helper()
@@ -86,9 +78,9 @@ func TestRefetchLimit(t *testing.T) {
 		f.clk.Add(time.Hour)
 		before := f.is.Fetches()
 		for _, b := range []*accesstest.Builder{
-			f.is.User(userEmail).Header("kid", randomKid(t)).Alg(accesstest.AlgNone),
-			f.is.User(userEmail).Header("kid", randomKid(t)).HS256WithPublicKey(),
-			f.is.User(userEmail).Header("kid", randomKid(t)).Alg(accesstest.AlgES256),
+			f.is.User(userEmail).Header("kid", rand.Text()).Alg(accesstest.AlgNone),
+			f.is.User(userEmail).Header("kid", rand.Text()).HS256WithPublicKey(),
+			f.is.User(userEmail).Header("kid", rand.Text()).Alg(accesstest.AlgES256),
 			f.is.User(userEmail).WithoutHeader("kid"),
 		} {
 			if _, err := f.a.Authenticate(request(b.Sign())); err == nil {
@@ -145,35 +137,78 @@ func TestSharedFetch(t *testing.T) {
 func TestRotation(t *testing.T) {
 	f := newFixture(t)
 	f.load(t)
+	log, path := auditLog(t)
+	srv := Middleware(f.a, log)(&okHandler{})
+	// through sends tok through the middleware and checks the status and
+	// the event it wrote (reason empty for auth.accepted).
+	through := func(t *testing.T, tok string, status int, reason string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, request(tok))
+		ev := readAudit(t, path)
+		last := ev[len(ev)-1]
+		if rec.Code != status {
+			t.Fatalf("status %d, want %d", rec.Code, status)
+		}
+		if reason == "" && last["event"] != "auth.accepted" || reason != "" && (last["event"] != "auth.rejected" || last["reason"] != reason) {
+			t.Fatalf("event = %v, want reason %q", last, reason)
+		}
+	}
 	oldTok := f.is.User(userEmail).Sign()
 	f.is.Rotate()
 	newTok := f.is.User(userEmail).Sign()
 	t.Run("sad/a new key inside the refetch limit is unknown", func(t *testing.T) {
-		if _, err := f.a.Authenticate(request(newTok)); reasonOf(t, err) != ReasonUnknownKey {
-			t.Fatalf("reason = %v", err)
-		}
+		through(t, newTok, http.StatusUnauthorized, "unknown_key")
 	})
 	t.Run("happy/a new key is picked up by the unknown-kid refetch", func(t *testing.T) {
 		f.clk.Add(MinRefetchInterval)
-		if _, err := f.a.Authenticate(request(newTok)); err != nil {
-			t.Fatal(err)
-		}
+		through(t, newTok, http.StatusOK, "")
 	})
 	t.Run("happy/the old key stays valid while it is served", func(t *testing.T) {
-		if _, err := f.a.Authenticate(request(oldTok)); err != nil {
-			t.Fatal(err)
-		}
+		through(t, oldTok, http.StatusOK, "")
+	})
+	t.Run("sad/a dropped key stays cached until the next refresh", func(t *testing.T) {
+		f.is.DropOld()
+		through(t, oldTok, http.StatusOK, "")
 	})
 	t.Run("sad/a dropped key is refused after the next refresh", func(t *testing.T) {
-		f.is.DropOld()
 		if err := f.a.keys.refresh(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.a.Authenticate(request(oldTok)); reasonOf(t, err) != ReasonUnknownKey {
+		through(t, oldTok, http.StatusUnauthorized, "unknown_key")
+		through(t, newTok, http.StatusOK, "")
+	})
+}
+
+// TestKeyAge: keys not refreshed for MaxKeyAge are no longer trusted.
+func TestKeyAge(t *testing.T) {
+	f := newFixture(t)
+	f.load(t)
+	f.is.Down()
+	tk := f.is.User(userEmail).Sign()
+	t.Run("edge/exactly seven days without a refresh still trusts the keys", func(t *testing.T) {
+		f.clk.Add(MaxKeyAge)
+		tk = f.is.User(userEmail).Sign()
+		if _, err := f.a.Authenticate(request(tk)); err != nil || !f.a.Ready() {
+			t.Fatalf("err %v, ready %t", err, f.a.Ready())
+		}
+	})
+	t.Run("sad/a second later the keys are stale: not ready, keys_unavailable", func(t *testing.T) {
+		f.clk.Add(time.Second)
+		tk = f.is.User(userEmail).Sign()
+		if f.a.Ready() || f.a.Status() != "key set not loaded" {
+			t.Fatal("still ready")
+		}
+		if _, err := f.a.Authenticate(request(tk)); reasonOf(t, err) != ReasonKeysUnavailable {
 			t.Fatalf("reason = %v", err)
 		}
-		if _, err := f.a.Authenticate(request(newTok)); err != nil {
-			t.Fatal(err)
+	})
+	t.Run("happy/a successful fetch trusts the keys again", func(t *testing.T) {
+		f.is.Up()
+		f.clk.Add(MinRefetchInterval)
+		tk = f.is.User(userEmail).Sign()
+		if _, err := f.a.Authenticate(request(tk)); err != nil || !f.a.Ready() {
+			t.Fatalf("err %v, ready %t", err, f.a.Ready())
 		}
 	})
 }
@@ -368,21 +403,27 @@ func TestStartClose(t *testing.T) {
 		cancel()
 		g.a.Close()
 	})
-	t.Run("sad/after a failed fetch the next try is a minute away, not an hour", func(t *testing.T) {
+	t.Run("sad/after a failed fetch the loop retries after the short wait, not the interval", func(t *testing.T) {
 		g := newFixture(t, WithRefreshInterval(time.Hour))
+		g.a.retry = 20 * time.Millisecond
 		g.is.Down()
 		g.a.Start(context.Background())
-		// The loop's retry wait is real time; check the value it chose.
-		if wait := retryWait(time.Hour, errors.New("x")); wait != MinRefetchInterval {
-			t.Fatalf("wait = %v", wait)
+		// Wait until the first fetch has failed, so the issuer comes back
+		// only for a retry.
+		if !leakcheck.Poll(5*time.Second, func() bool { return strings.Contains(g.logs.String(), `"reason":"network"`) }) {
+			t.Fatal("the first fetch never failed")
 		}
-		if wait := retryWait(time.Hour, nil); wait != time.Hour {
-			t.Fatalf("wait = %v", wait)
-		}
-		if wait := retryWait(time.Second, errors.New("x")); wait != time.Second {
-			t.Fatalf("wait = %v", wait)
+		g.is.Up()
+		if !leakcheck.Poll(5*time.Second, g.a.Ready) {
+			t.Fatal("not ready: the loop waited the refresh interval after a failure")
 		}
 		g.a.Close()
+	})
+	t.Run("happy/retryWait never waits longer than the interval", func(t *testing.T) {
+		if retryWait(time.Hour, time.Minute, errors.New("x")) != time.Minute || retryWait(time.Hour, time.Minute, nil) != time.Hour ||
+			retryWait(time.Second, time.Minute, errors.New("x")) != time.Second {
+			t.Fatal("retryWait")
+		}
 	})
 }
 
@@ -394,10 +435,7 @@ func TestParseKeySet(t *testing.T) {
 		t.Fatal(err)
 	}
 	with := func(k map[string]any, field string, v any) map[string]any {
-		c := map[string]any{}
-		for kk, vv := range k {
-			c[kk] = vv
-		}
+		c := maps.Clone(k)
 		if v == nil {
 			delete(c, field)
 		} else {
@@ -420,6 +458,7 @@ func TestParseKeySet(t *testing.T) {
 		{"sad/a 1024-bit key is skipped", []any{accesstest.RSAJWK("small", &small.PublicKey)}, nil},
 		{"raging/a private key is skipped", []any{priv}, nil},
 		{"raging/a key that does not parse is skipped", []any{map[string]any{"kid": "x", "kty": "RSA", "n": "!!", "e": "AQAB"}, good}, []string{"good"}},
+		{"raging/an exponent of 1 is skipped", []any{with(good, "e", "AQ")}, nil},
 		{"raging/an unknown key type is skipped", []any{map[string]any{"kid": "x", "kty": "OKP", "crv": "X448", "x": "AA"}, good}, []string{"good"}},
 		{"corner/a duplicate kid keeps the first", []any{good, with(accesstest.RSAJWK("good", &accesstest.RSAKey(1).PublicKey), "kid", "good")}, []string{"good"}},
 	}

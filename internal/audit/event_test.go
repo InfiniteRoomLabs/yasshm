@@ -41,6 +41,8 @@ func TestEvents(t *testing.T) {
 			"event": "auth.rejected", "request_id": "r2", "decision": "deny", "reason": "missing_token"}},
 		{"sad/auth.rejected for an unmapped principal", AuthRejected("r3", RejectUnmappedPrincipal, svc), map[string]any{
 			"event": "auth.rejected", "request_id": "r3", "principal": "service:abc.access", "decision": "deny", "reason": "unmapped_principal"}},
+		{"raging/auth.rejected summary of suppressed rejections", AuthRejectionsSuppressed(940), map[string]any{
+			"event": "auth.rejected", "decision": "deny", "reason": "suppressed", "count": float64(940)}},
 		{"happy/tool.called", ToolCalled(actor, "run_command", "lab-1", ToolArgs{Command: "uptime", WaitSeconds: i64(5), MergeStderr: yes()}), map[string]any{
 			"event": "tool.called", "request_id": "req-1", "tenant": "default", "principal": "user:operator@example.net", "tool": "run_command", "server": "lab-1",
 			"args": map[string]any{"command": "uptime", "wait_seconds": float64(5), "merge_stderr": true}}},
@@ -147,7 +149,7 @@ func TestNoSecretFields(t *testing.T) {
 		typ  reflect.Type
 		want string
 	}{
-		{"happy/record", reflect.TypeFor[record](), "args,bytes,code,command,command_id,decision,duration_ms,error_code,event,exit_code,listen,mode,offset,overwrite,path,principal,reason,request_id,rule,server,signal,stage,status,stderr_bytes,stdout_bytes,tenant,timeout_seconds,tool,truncated,ts,version"},
+		{"happy/record", reflect.TypeFor[record](), "args,bytes,code,command,command_id,count,decision,duration_ms,error_code,event,exit_code,listen,mode,offset,overwrite,path,principal,reason,request_id,rule,server,signal,stage,status,stderr_bytes,stdout_bytes,tenant,timeout_seconds,tool,truncated,ts,version"},
 		{"happy/tool arguments", reflect.TypeFor[ToolArgs](), "command,command_id,content_bytes,cursor,limit,max_bytes,merge_stderr,mode,offset,overwrite,path,signal,status,stream,timeout_seconds,wait_seconds"},
 	}
 	for _, c := range cases {

@@ -10,6 +10,7 @@ import (
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/json"
+	"maps"
 	"strings"
 	"time"
 )
@@ -208,9 +209,5 @@ func TamperSignature(tok string) string {
 
 // Claims returns a copy of the builder's claims, for TamperPayload.
 func (b *Builder) Claims() map[string]any {
-	out := make(map[string]any, len(b.claims))
-	for k, v := range b.claims {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(b.claims)
 }

@@ -28,6 +28,10 @@ const (
 	MinRefetchInterval = time.Minute
 	// DefaultRefreshInterval is how often the key set is refreshed.
 	DefaultRefreshInterval = time.Hour
+	// MaxKeyAge is how long a key set stays trusted without a successful
+	// fetch: the vendor keeps a retired key valid for seven days (F8), so a
+	// set older than that may hold a key the vendor no longer honours.
+	MaxKeyAge = 7 * 24 * time.Hour
 	// minRSABits is the smallest RSA modulus a served key may have.
 	minRSABits = 2048
 	// maxRedirects is how many same-host redirects a fetch follows.
@@ -75,6 +79,7 @@ type keySet struct {
 	mu        sync.Mutex
 	keys      map[string]*rsa.PublicKey
 	loaded    bool
+	lastOK    time.Time // when the keys in use were fetched
 	lastFetch time.Time // start of the last fetch, any cause
 	inflight  *fetchCall
 	closed    bool
@@ -124,21 +129,28 @@ func allowedScheme(u *url.URL) bool {
 	return u.Scheme == "http" && ip != nil && ip.IsLoopback()
 }
 
-// ready reports whether a key set has been loaded.
+// ready reports whether a key set is loaded and was fetched at most
+// MaxKeyAge ago.
 func (ks *keySet) ready() bool {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
-	return ks.loaded
+	return ks.freshLocked()
 }
 
-// lookup returns the key for kid. When kid is unknown, or no key set is
-// loaded, it joins the fetch in flight, or starts one if MinRefetchInterval
-// has passed since the last fetch began, and looks again once that fetch
-// ends. Otherwise it answers at once: ReasonKeysUnavailable while nothing
-// is loaded, ReasonUnknownKey after.
+// freshLocked is ready with ks.mu held.
+func (ks *keySet) freshLocked() bool {
+	return ks.loaded && ks.now().Sub(ks.lastOK) <= MaxKeyAge
+}
+
+// lookup returns the key for kid. When kid is unknown, or no fresh key set
+// is loaded (none yet, or the last success is older than MaxKeyAge), it
+// joins the fetch in flight, or starts one if MinRefetchInterval has passed
+// since the last fetch began, and looks again once that fetch ends.
+// Otherwise it answers at once: ReasonKeysUnavailable while no fresh set is
+// loaded, ReasonUnknownKey after.
 func (ks *keySet) lookup(ctx context.Context, kid string) (*rsa.PublicKey, error) {
 	ks.mu.Lock()
-	if k, ok := ks.keys[kid]; ok {
+	if k, ok := ks.keys[kid]; ok && ks.freshLocked() {
 		ks.mu.Unlock()
 		return k, nil
 	}
@@ -155,11 +167,11 @@ func (ks *keySet) lookup(ctx context.Context, kid string) (*rsa.PublicKey, error
 	}
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
+	if !ks.freshLocked() {
+		return nil, reject(ReasonKeysUnavailable)
+	}
 	if k, ok := ks.keys[kid]; ok {
 		return k, nil
-	}
-	if !ks.loaded {
-		return nil, reject(ReasonKeysUnavailable)
 	}
 	return nil, reject(ReasonUnknownKey)
 }
@@ -198,7 +210,7 @@ func (ks *keySet) startLocked() *fetchCall {
 		keys, err := ks.fetch()
 		ks.mu.Lock()
 		if err == nil {
-			ks.keys, ks.loaded = keys, true
+			ks.keys, ks.loaded, ks.lastOK = keys, true, ks.now()
 		}
 		ks.inflight = nil
 		ks.mu.Unlock()

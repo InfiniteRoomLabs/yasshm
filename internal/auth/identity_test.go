@@ -21,6 +21,11 @@ func TestResolve(t *testing.T) {
 	}{
 		{name: "happy/user", id: identity{Email: userEmail, Subject: "u1"}, want: user},
 		{name: "happy/service token", id: identity{CommonName: serviceCN}, want: service},
+		{name: "edge/a user subject is lower-cased", id: identity{Email: "Operator@Example.NET"}, want: user},
+		{name: "edge/an unmapped user subject is recorded lower-cased", id: identity{Email: "Stranger@Example.NET"}, err: ReasonUnmappedPrincipal,
+			who: tenant.Principal{Kind: tenant.KindUser, Subject: otherEmail}},
+		{name: "edge/a service subject keeps its case", id: identity{CommonName: strings.ToUpper(serviceCN)}, err: ReasonUnmappedPrincipal,
+			who: tenant.Principal{Kind: tenant.KindService, Subject: strings.ToUpper(serviceCN)}},
 		{name: "happy/second tenant", id: identity{CommonName: service2CN}, want: tenant.Principal{Tenant: tenant2ID, Kind: tenant.KindService, Subject: service2CN}},
 		{name: "sad/neither", id: identity{Subject: "u1"}, err: ReasonMissingClaim},
 		{name: "sad/both", id: identity{Email: userEmail, CommonName: serviceCN}, err: ReasonAmbiguousIdentity},
@@ -68,7 +73,8 @@ func TestResolve(t *testing.T) {
 
 // FuzzResolve checks the properties of the claims-to-principal mapping
 // (spec section 7): it never panics; an accepted principal's tenant admits
-// its subject and has its kind; a subject that is not printable ASCII never
+// its subject and has its kind; a user subject is the email in ASCII lower
+// case; a subject that is not printable ASCII never
 // maps; a user subject never maps as a service and the other way round.
 func FuzzResolve(f *testing.F) {
 	for _, s := range [][3]string{
@@ -108,7 +114,7 @@ func FuzzResolve(f *testing.F) {
 		}
 		switch p.Kind {
 		case tenant.KindUser:
-			if p.Subject != email || cn != "" {
+			if p.Subject != strings.ToLower(email) || cn != "" {
 				t.Fatalf("user %+v from email %q cn %q", p, email, cn)
 			}
 		case tenant.KindService:

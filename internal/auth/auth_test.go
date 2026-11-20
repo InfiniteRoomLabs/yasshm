@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,17 @@ func tok(build func(f *fixture) string) func(f *fixture) *http.Request {
 }
 
 func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+// userPayload is a valid user token's claims without email, as JSON, with
+// extra (raw JSON members) appended: the way to send duplicate or
+// case-variant members, which a map cannot hold.
+func userPayload(f *fixture, extra string) string {
+	b, err := json.Marshal(f.is.User(userEmail).Without("email").Claims())
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimSuffix(string(b), "}") + "," + extra + "}"
+}
 
 // signedPayload signs an arbitrary payload with the issuer's current key.
 func signedPayload(f *fixture, payload string) string {
@@ -60,7 +73,7 @@ func tokenClasses() []tokenClass {
 		}), who: user},
 		{name: "edge/email in another ASCII case", req: tok(func(f *fixture) string {
 			return f.is.User("Operator@Example.NET").Sign()
-		}), who: tenant.Principal{Tenant: tenantID, Kind: tenant.KindUser, Subject: "Operator@Example.NET"}},
+		}), who: user},
 		{name: "edge/exp exactly 30 seconds ago", req: tok(func(f *fixture) string {
 			return f.is.User(userEmail).Times(now(f), -600, -600, -30).Sign()
 		}), who: user},
@@ -226,6 +239,42 @@ func tokenClasses() []tokenClass {
 		{name: "corner/expired and wrong audience", req: tok(func(f *fixture) string {
 			return f.is.User(userEmail).Claim("aud", "x").Times(now(f), -600, -600, -60).Sign()
 		}), want: ReasonWrongAudience},
+		{name: "raging/duplicate email member", req: tok(func(f *fixture) string {
+			return signedPayload(f, userPayload(f, `"email":"`+otherEmail+`","email":"`+userEmail+`"`))
+		}), want: ReasonMalformedToken},
+		{name: "raging/duplicate aud member", req: tok(func(f *fixture) string {
+			return signedPayload(f, userPayload(f, `"email":"`+userEmail+`","aud":["x"]`))
+		}), want: ReasonMalformedToken},
+		{name: "raging/Email in another case alone", req: tok(func(f *fixture) string {
+			return signedPayload(f, userPayload(f, `"Email":"`+userEmail+`"`))
+		}), want: ReasonMissingClaim},
+		{name: "raging/email for a stranger and EMAIL for the operator", req: tok(func(f *fixture) string {
+			return signedPayload(f, userPayload(f, `"email":"`+otherEmail+`","EMAIL":"`+userEmail+`"`))
+		}), want: ReasonUnmappedPrincipal, who: tenant.Principal{Kind: tenant.KindUser, Subject: otherEmail}},
+		{name: "raging/ISS in another case does not stand in for iss", req: tok(func(f *fixture) string {
+			b, _ := json.Marshal(f.is.User(userEmail).Without("iss").Claims())
+			return signedPayload(f, strings.TrimSuffix(string(b), "}")+`,"ISS":"https://`+accesstest.TeamDomain+`"}`)
+		}), want: ReasonWrongIssuer},
+		{name: "raging/embedded jwk header with the attacker's key", req: tok(func(f *fixture) string {
+			return f.is.User(userEmail).Header("jwk", accesstest.RSAJWK("key-0", &accesstest.RSAKey(2).PublicKey)).SignWith(accesstest.RSAKey(2)).Sign()
+		}), want: ReasonBadSignature},
+		{name: "raging/embedded jwk header without a kid", req: tok(func(f *fixture) string {
+			return f.is.User(userEmail).WithoutHeader("kid").Header("jwk", accesstest.RSAJWK("x", &accesstest.RSAKey(2).PublicKey)).SignWith(accesstest.RSAKey(2)).Sign()
+		}), want: ReasonUnknownKey},
+		{name: "raging/jku header to the attacker's key set", req: tok(func(f *fixture) string {
+			return f.is.User(userEmail).Header("jku", "https://example.net/certs").SignWith(accesstest.RSAKey(2)).Sign()
+		}), want: ReasonBadSignature},
+		{name: "raging/x5c header", req: tok(func(f *fixture) string {
+			return f.is.User(userEmail).Header("x5c", []string{"AAAA"}).SignWith(accesstest.RSAKey(2)).Sign()
+		}), want: ReasonMalformedToken},
+		{name: "raging/unknown crit header", req: tok(func(f *fixture) string {
+			return f.is.User(userEmail).Header("crit", []string{"x-yasshm-test"}).Header("x-yasshm-test", 1).Sign()
+		}), want: ReasonBadSignature},
+		{name: "raging/JWS JSON serialization", req: tok(func(f *fixture) string {
+			sg := accesstest.Segments(f.is.User(userEmail).Sign())
+			return `{"payload":"` + sg[1] + `","protected":"` + sg[0] + `","signature":"` + sg[2] + `"}`
+		}), want: ReasonMalformedToken},
+		{name: "raging/five segments", req: tok(func(f *fixture) string { return f.is.User(userEmail).Sign() + ".x.y" }), want: ReasonMalformedToken},
 		{name: "corner/alg none with a valid RS256 signature appended", req: tok(func(f *fixture) string {
 			good := accesstest.Segments(f.is.User(userEmail).Sign())
 			bad := accesstest.Segments(f.is.User(userEmail).Alg(accesstest.AlgNone).Sign())
@@ -253,19 +302,12 @@ func TestTokenClasses(t *testing.T) {
 			}
 			if c.want == ReasonUnmappedPrincipal {
 				var ae *Error
-				_ = asError(err, &ae)
-				if ae.who != c.who {
+				if !errors.As(err, &ae) || ae.who != c.who {
 					t.Fatalf("recorded principal = %+v, want %+v", ae.who, c.who)
 				}
 			}
 		})
 	}
-}
-
-func asError(err error, target **Error) bool {
-	e, ok := err.(*Error) //nolint:errorlint // Authenticate returns *Error itself
-	*target = e
-	return ok
 }
 
 // TestTokenClassesThroughMiddleware sends every class through Middleware
@@ -376,9 +418,9 @@ func TestStatusText(t *testing.T) {
 
 func TestResponseHeaders(t *testing.T) {
 	f := newFixture(t)
-	log, _ := auditLog(t)
+	log, path := auditLog(t)
 	srv := Middleware(f.a, log)(&okHandler{})
-	t.Run("sad/503 carries Retry-After", func(t *testing.T) {
+	t.Run("sad/keys_unavailable: 503 with Retry-After and its event", func(t *testing.T) {
 		f.is.Down()
 		if err := f.a.keys.refresh(context.Background()); err == nil {
 			t.Fatal("a fetch from a stopped issuer succeeded")
@@ -387,6 +429,10 @@ func TestResponseHeaders(t *testing.T) {
 		srv.ServeHTTP(rec, request(f.is.User(userEmail).Sign()))
 		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "60" || rec.Body.String() != bodyUnavailable {
 			t.Fatalf("status = %d, headers %v", rec.Code, rec.Header())
+		}
+		ev := readAudit(t, path)
+		if len(ev) != 1 || ev[0]["event"] != "auth.rejected" || ev[0]["reason"] != "keys_unavailable" {
+			t.Fatalf("events = %v", ev)
 		}
 	})
 	t.Run("sad/401 is JSON and not cached", func(t *testing.T) {

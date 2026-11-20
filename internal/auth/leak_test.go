@@ -76,11 +76,11 @@ func TestNothingLeaks(t *testing.T) {
 		t.Fatal("the test captured nothing; it would prove nothing")
 	}
 
-	for _, k := range []*accesstest.Key{{ID: "key-0", Private: accesstest.RSAKey(0)}} {
-		for _, b := range [][]byte{k.Private.N.Bytes(), k.Private.D.Bytes(), k.Private.Primes[0].Bytes()} {
-			secrets = append(secrets, base64.RawURLEncoding.EncodeToString(b)[:24], base64.StdEncoding.EncodeToString(b)[:24], hex.EncodeToString(b)[:24])
-		}
+	k := accesstest.RSAKey(0)
+	for _, b := range [][]byte{k.N.Bytes(), k.D.Bytes(), k.Primes[0].Bytes()} {
+		secrets = append(secrets, base64.RawURLEncoding.EncodeToString(b)[:24], base64.StdEncoding.EncodeToString(b)[:24], hex.EncodeToString(b)[:24])
 	}
+	secrets = append(secrets, accesstest.TeamDomain, accesstest.Audience)
 	for _, s := range secrets {
 		if strings.Contains(all, s) {
 			t.Errorf("raging/captured output contains a token, segment or key fragment (%d bytes)", len(s))

@@ -12,22 +12,24 @@ import (
 // an unmapped rejection. An email address is at most 254 bytes.
 const maxSubjectBytes = 320
 
-// identity holds the verified identity claims of a token (F7).
+// identity holds the verified identity claims of a token (F7), decoded
+// from the payload beside the registered claims.
 type identity struct {
 	// Email is the email claim of a user token.
-	Email string
+	Email string `json:"email"`
 	// CommonName is the common_name claim of a service token (its client id).
-	CommonName string
+	CommonName string `json:"common_name"`
 	// Subject is the sub claim; empty in a service token.
-	Subject string
+	Subject string `json:"sub"`
 }
 
 // resolve maps verified identity claims to a principal through the
 // tenants' principals lists. It is a pure function:
 //
 //   - a non-empty email and no common_name is a user (KindUser, subject = the
-//     email); a non-empty common_name, an empty sub and no email is a service
-//     token (KindService, subject = the common name);
+//     email in ASCII lower case, so one person is one principal in audit
+//     events and command records); a non-empty common_name, an empty sub and no email is a service
+//     token (KindService, subject = the common name, as given);
 //   - both email and common_name, or a common_name with a non-empty sub, is
 //     ReasonAmbiguousIdentity; neither is ReasonMissingClaim;
 //   - a subject that is not printable ASCII (a control character, a byte
@@ -56,6 +58,9 @@ func resolve(id identity, tenants []tenant.Tenant) (tenant.Principal, error) {
 	}
 	if !printable(subject) {
 		return tenant.Principal{}, reject(ReasonUnmappedPrincipal)
+	}
+	if kind == tenant.KindUser {
+		subject = strings.ToLower(subject) // printable ASCII, so ASCII folding only
 	}
 	var found *tenant.Tenant
 	matches := 0

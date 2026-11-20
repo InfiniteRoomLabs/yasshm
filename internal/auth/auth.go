@@ -12,7 +12,9 @@
 // must name a key in the key set; the signature is checked with that key;
 // iss must equal "https://" + team domain exactly; aud (a string or an
 // array) must contain the configured audience; exp, nbf and iat are checked
-// with Leeway (30 seconds) each way by the library. This package requires
+// with Leeway (30 seconds) each way by the library. The verified payload is
+// decoded with the library's own JSON decoder (case-sensitive member names,
+// duplicate members refused). This package requires
 // exp and iat on every token and nbf on a user token (the library checks a
 // time claim only when it is present); the vendor's service tokens carry no
 // nbf (F7), so on a service token nbf is checked when present.
@@ -22,7 +24,8 @@
 // one hour; one minute after a failed fetch), and refetched when a token
 // names an unknown kid -- at most once per MinRefetchInterval whatever the
 // traffic, and concurrent callers share one fetch. A failed fetch keeps the
-// last good keys. Until the first fetch succeeds every request whose token
+// last good keys, but only for MaxKeyAge (seven days, how long the vendor
+// keeps a retired key valid) after the last successful fetch. Until the first fetch succeeds every request whose token
 // gets as far as the key lookup is ReasonKeysUnavailable (a missing,
 // oversized or malformed token, a wrong alg or a missing kid is refused for
 // that reason first, without a fetch), and Ready and Status say so.
@@ -31,12 +34,14 @@
 // the reason's name and nothing else. The token, its segments, key material
 // and network error text never appear in an error, a log line or an audit
 // event. Middleware writes auth.accepted or auth.rejected for every request
-// and puts the principal in the request context.
+// and puts the principal in the request context; a user's subject is the
+// email in ASCII lower case. The middleware writes rejections made before a
+// signature is verified only RejectAllowance times a minute and summarises
+// the rest.
 package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -46,6 +51,7 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/json"
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/config"
@@ -79,6 +85,7 @@ type CloudflareAccess struct {
 	now      func() time.Time
 	log      *slog.Logger
 	interval time.Duration
+	retry    time.Duration // the wait after a failed fetch; MinRefetchInterval, shorter in tests
 	keys     *keySet
 
 	mu      sync.Mutex // guards started and closed
@@ -149,6 +156,7 @@ func NewCloudflareAccess(cfg config.CloudflareAccess, tenants []tenant.Tenant, o
 		now:      o.now,
 		log:      o.log,
 		interval: o.interval,
+		retry:    MinRefetchInterval,
 		keys:     newKeySet(certs, o.client, o.now, o.log),
 		stop:     make(chan struct{}),
 	}, nil
@@ -171,7 +179,7 @@ func (a *CloudflareAccess) Start(ctx context.Context) {
 func (a *CloudflareAccess) run(ctx context.Context) {
 	defer a.wg.Done()
 	for {
-		t := time.NewTimer(retryWait(a.interval, a.keys.refresh(ctx)))
+		t := time.NewTimer(retryWait(a.interval, a.retry, a.keys.refresh(ctx)))
 		select {
 		case <-ctx.Done():
 			t.Stop()
@@ -185,10 +193,10 @@ func (a *CloudflareAccess) run(ctx context.Context) {
 }
 
 // retryWait is how long the refresh loop waits after a fetch: the
-// interval, or at most MinRefetchInterval after a failure.
-func retryWait(interval time.Duration, err error) time.Duration {
-	if err != nil && interval > MinRefetchInterval {
-		return MinRefetchInterval
+// interval, or at most retry after a failure.
+func retryWait(interval, retry time.Duration, err error) time.Duration {
+	if err != nil && interval > retry {
+		return retry
 	}
 	return interval
 }
@@ -219,13 +227,6 @@ func (a *CloudflareAccess) Status() string {
 		return "key set loaded"
 	}
 	return "key set not loaded"
-}
-
-// claims are the identity claims this package reads, beside the
-// registered ones go-jose decodes.
-type claims struct {
-	Email      string `json:"email"`
-	CommonName string `json:"common_name"`
 }
 
 // Authenticate verifies the request's token and maps it to a principal.
@@ -269,20 +270,22 @@ func (a *CloudflareAccess) verify(ctx context.Context, raw string) (tenant.Princ
 	if err != nil {
 		return tenant.Principal{}, reject(ReasonBadSignature)
 	}
+	// The library's own decoder: member names match case-sensitively and a
+	// duplicate member is an error, as in jwt.JSONWebToken.Claims.
 	var std jwt.Claims
-	var id claims
+	var id identity
 	if json.Unmarshal(payload, &std) != nil || json.Unmarshal(payload, &id) != nil {
 		return tenant.Principal{}, reject(ReasonMalformedToken)
 	}
 	if err := a.checkClaims(&std, &id); err != nil {
 		return tenant.Principal{}, err
 	}
-	return resolve(identity{Email: id.Email, CommonName: id.CommonName, Subject: std.Subject}, a.tenants)
+	return resolve(id, a.tenants)
 }
 
 // checkClaims runs the library's issuer, audience and time checks with
 // Leeway, after requiring the time claims the library treats as optional.
-func (a *CloudflareAccess) checkClaims(std *jwt.Claims, id *claims) error {
+func (a *CloudflareAccess) checkClaims(std *jwt.Claims, id *identity) error {
 	if std.Expiry == nil || std.IssuedAt == nil || (std.NotBefore == nil && id.Email != "") {
 		return reject(ReasonMissingClaim)
 	}
