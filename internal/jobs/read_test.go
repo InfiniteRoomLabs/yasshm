@@ -531,7 +531,10 @@ func TestConcurrency(t *testing.T) {
 			if i%2 == 1 {
 				sid = "srv-2"
 			}
-			r, err := h.e.Start(context.Background(), tA, h.actorA, sid, "echo $$; sleep 0.2", StartOptions{})
+			// Every command holds its slot until the test releases it, so
+			// none can finish during the burst and free a slot for a
+			// ninth start (seen once in CI with "sleep 0.2").
+			r, err := h.e.Start(context.Background(), tA, h.actorA, sid, "echo $$; while [ ! -e release ]; do sleep 0.05; done", StartOptions{})
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -547,6 +550,9 @@ func TestConcurrency(t *testing.T) {
 	wg.Wait()
 	if len(ids) == 0 || len(ids) > 8 || len(ids)+busyN != 24 {
 		t.Fatalf("%d started, %d busy", len(ids), busyN)
+	}
+	if err := os.WriteFile(filepath.Join(h.sa.Root, "release"), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	for i, id := range ids {
 		wg.Add(3)
