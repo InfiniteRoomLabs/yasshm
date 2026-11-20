@@ -112,6 +112,11 @@ func Serve(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	g := &gateway{log: log}
 	defer g.close(ctx)
 	if err := g.start(ctx, *path); err != nil {
+		if ctx.Err() != nil {
+			// A signal during start-up: not a failure, nothing was served.
+			log.Info("start-up interrupted", "reason", "signal")
+			return exitOK
+		}
 		log.Error("start-up failed", "reason", err.Error())
 		return exitError
 	}
@@ -126,6 +131,7 @@ type gateway struct {
 	engine  *jobs.Engine
 	auth    *auth.CloudflareAccess
 	guard   *auth.Guard
+	gw      *mcpserver.Gateway
 	srv     *http.Server
 	ln      net.Listener
 	stopped bool
@@ -181,14 +187,14 @@ func (g *gateway) start(ctx context.Context, path string) error {
 	}
 	g.auth.Start(ctx)
 	g.guard = auth.NewGuard(g.auth, g.audit, auth.WithMiddlewareLogger(g.log))
-	gw, err := mcpserver.New(mcpserver.Config{
+	g.gw, err = mcpserver.New(mcpserver.Config{
 		Version: Version, Tenants: cfg.Tenants, Policy: pe, Jobs: g.engine, Audit: g.audit,
 		Guard: g.guard, Health: g.auth, Logger: g.log,
 	})
 	if err != nil {
 		return startError("the MCP endpoint cannot be built")
 	}
-	g.srv = gw.HTTPServer()
+	g.srv = g.gw.HTTPServer()
 	var lc net.ListenConfig
 	if g.ln, err = lc.Listen(ctx, "tcp", cfg.Gateway.Listen); err != nil {
 		return startError("the listen address cannot be bound")
@@ -268,8 +274,9 @@ func (g *gateway) grace() time.Duration {
 
 // shutdown stops accepting, shuts the engine down within the grace (the
 // commands are ended and marked killed, so requests waiting on them answer),
-// waits briefly for in-flight requests, closes the guard and the
-// authenticator and writes gateway.stopped.
+// waits for in-flight requests and tool calls (probes and transfers too, at
+// most the grace, then cancelled), closes the guard and the authenticator
+// and writes gateway.stopped.
 func (g *gateway) shutdown(ctx context.Context, reason audit.StopReason) {
 	ctx, cancel := context.WithTimeout(ctx, g.grace()+httpCloseWait)
 	defer cancel()
@@ -285,6 +292,12 @@ func (g *gateway) shutdown(ctx context.Context, reason audit.StopReason) {
 	}
 	g.engine = nil
 	<-httpDone
+	// Probes and file transfers are not the engine's: wait for them (and
+	// any other tool call still writing its audit events), so
+	// gateway.stopped is the last event.
+	if err := g.gw.Shutdown(ctx); err != nil {
+		g.log.Error("tool calls still running at shutdown")
+	}
 	g.guard.Close()
 	g.auth.Close()
 	g.auth = nil

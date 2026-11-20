@@ -811,5 +811,11 @@ func (d *decoder) limits(tf *fields) tenant.Limits {
 			d.add(join(base, pr.lo), f.lineNode(pr.lo), "must not exceed %s (%d > %d)", pr.hi, *lo.field(&l), *hi.field(&l))
 		}
 	}
+	if valid["max_wait_seconds"] && valid["connect_timeout_seconds"] {
+		if sum := l.MaxWaitSeconds + 2*l.ConnectTimeoutSeconds; sum > MaxToolSeconds {
+			d.add(join(base, "max_wait_seconds"), f.lineNode("max_wait_seconds"),
+				"plus twice connect_timeout_seconds must not exceed %d (%d > %d)", MaxToolSeconds, sum, MaxToolSeconds)
+		}
+	}
 	return l
 }

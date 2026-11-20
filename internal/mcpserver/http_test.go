@@ -16,6 +16,8 @@ import (
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/auth"
+	"github.com/InfiniteRoomLabs/yasshm/internal/jobs"
+	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/edgetest"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 )
@@ -304,7 +306,7 @@ func TestRequestCap(t *testing.T) {
 	h.session(userA)
 	done := make(chan rawResp, 1)
 	go func() {
-		done <- h.rawCall(t, userA, ToolRunCommand, map[string]any{"server": "srv-1", "command": "sleep 3", "wait_seconds": 8})
+		done <- h.rawCall(t, userA, ToolRunCommand, map[string]any{"server": "srv-1", "command": "sleep 30", "wait_seconds": 9})
 	}()
 	if !leakcheck.Poll(10*time.Second, func() bool { return len(h.gw.slots) == 1 }) {
 		t.Fatal("the first request never took the slot")
@@ -324,6 +326,21 @@ func TestRequestCap(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "request cap reached") {
 		t.Fatal("no log line for the refusal")
 	}
+	// End the first request by an event, not by its wait: kill its command
+	// through the engine (the one request slot is taken).
+	// The slot is taken when the request arrives, before its command starts.
+	var page jobs.ListPage
+	if !leakcheck.Poll(10*time.Second, func() bool {
+		var err error
+		page, err = h.e.List(context.WithoutCancel(t.Context()), tA, jobs.ListFilter{})
+		return err == nil && len(page.Records) == 1 && !page.Records[0].StartedAt.IsZero()
+	}) {
+		t.Fatalf("records %v", page.Records)
+	}
+	actor := audit.Actor{RequestID: "r", Principal: tenant.Principal{Tenant: tA, Kind: tenant.KindUser, Subject: userA}}
+	if _, _, err := h.e.Kill(context.WithoutCancel(t.Context()), tA, actor, page.Records[0].ID, jobs.SignalKill); err != nil {
+		t.Fatal(err)
+	}
 	if first := <-done; first.code != http.StatusOK {
 		t.Fatalf("first = %d", first.code)
 	}
@@ -338,7 +355,7 @@ func TestDerivedLimits(t *testing.T) {
 		t.Fatalf("WriteTimeoutFor = %v", got)
 	}
 	ts[0].Limits.MaxWaitSeconds = 110
-	if got := WriteTimeoutFor(ts); got != 110*time.Second+WriteMargin {
+	if got := WriteTimeoutFor(ts); got != 110*time.Second+2*5*time.Second+WriteMargin {
 		t.Fatalf("WriteTimeoutFor = %v", got)
 	}
 }

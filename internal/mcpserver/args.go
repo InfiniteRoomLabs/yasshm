@@ -7,20 +7,30 @@ import (
 	"io"
 	"regexp"
 	"slices"
+	"unicode/utf8"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/jobs"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 )
 
-// The patterns ids must match before they are used (spec 5.1 and 5.6).
+// The patterns ids and enums must match before they are used (spec 5.1 and
+// 5.6). Each expression is written once: the validator, its message and the
+// schema's pattern all use these strings.
+const (
+	serverIDExpr  = `^[a-z0-9][a-z0-9-]{0,62}$`
+	commandIDExpr = `^[0-9a-f]{32}$`
+	// cursorExpr is the shape of a jobs cursor: "c1." then base64url. The
+	// engine checks its content; this only bounds what reaches it.
+	cursorExpr = `^[A-Za-z0-9._-]{1,256}$`
+	// modeExpr is an octal permission mode of at most 0777.
+	modeExpr = `^0?[0-7]{3}$`
+)
+
 var (
-	serverIDPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-	commandIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	// cursorPattern is the shape of a jobs cursor: "c1." then base64url.
-	// The engine checks its content; this only bounds what reaches it.
-	cursorPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)
-	// modePattern is an octal permission mode of at most 0777.
-	modePattern = regexp.MustCompile(`^0?[0-7]{3}$`)
+	serverIDPattern  = regexp.MustCompile(serverIDExpr)
+	commandIDPattern = regexp.MustCompile(commandIDExpr)
+	cursorPattern    = regexp.MustCompile(cursorExpr)
+	modePattern      = regexp.MustCompile(modeExpr)
 )
 
 // maxArgBytes bounds the arguments object of every tool but upload_file. A
@@ -103,7 +113,7 @@ func checkServerID(s string, required bool) error {
 		return nil
 	}
 	if !serverIDPattern.MatchString(s) {
-		return argError("server must match ^[a-z0-9][a-z0-9-]{0,62}$")
+		return argError("server must match " + serverIDExpr)
 	}
 	return nil
 }
@@ -135,5 +145,51 @@ func checkStatus(s string) error {
 	return nil
 }
 
+// argIf is an invalid_argument with msg when bad is true, else nil; with
+// cmp.Or it reads the checks in order and keeps the first failure.
+func argIf(bad bool, msg string) error {
+	if bad {
+		return argError(msg)
+	}
+	return nil
+}
+
 // sid converts a validated server argument.
 func sid(s string) tenant.ServerID { return tenant.ServerID(s) }
+
+// auditInvalid stands for an id or enum argument that did not match its
+// pattern: it matches no pattern itself, so it cannot be mistaken for one.
+const auditInvalid = "(invalid)"
+
+// auditTruncated marks a free-text argument cut for the audit log.
+const auditTruncated = " [cut for the audit log]"
+
+// auditPathBytes bounds a path in the audit log (policy refuses longer).
+const auditPathBytes = 4096
+
+// auditEnum returns s for the audit log when it is empty or valid, else
+// auditInvalid: an unvalidated value never reaches an id field.
+func auditEnum(s string, valid bool) string {
+	if s == "" || valid {
+		return s
+	}
+	return auditInvalid
+}
+
+// auditServer is auditEnum for a server id.
+func auditServer(s string) tenant.ServerID {
+	return tenant.ServerID(auditEnum(s, serverIDPattern.MatchString(s)))
+}
+
+// auditText cuts a free-text argument at n bytes (on a character boundary)
+// and marks the cut, so no event carries more than about n bytes of it.
+func auditText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + auditTruncated
+}

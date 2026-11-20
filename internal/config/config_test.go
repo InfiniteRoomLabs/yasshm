@@ -349,7 +349,7 @@ var wantLimits = []wantLimit{
 	{"max_data_bytes", 1073741824, 1048576, 1099511627776, func(l tenant.Limits) int64 { return l.MaxDataBytes }},
 	{"max_upload_bytes", 1048576, 1, 1048576, func(l tenant.Limits) int64 { return l.MaxUploadBytes }},
 	{"kill_grace_seconds", 5, 1, 60, func(l tenant.Limits) int64 { return l.KillGraceSeconds }},
-	{"connect_timeout_seconds", 10, 1, 120, func(l tenant.Limits) int64 { return l.ConnectTimeoutSeconds }},
+	{"connect_timeout_seconds", 10, 1, 59, func(l tenant.Limits) int64 { return l.ConnectTimeoutSeconds }},
 	{"shutdown_grace_seconds", 20, 1, 300, func(l tenant.Limits) int64 { return l.ShutdownGraceSeconds }},
 }
 
@@ -361,6 +361,10 @@ var wantPairs = [][2]string{
 	{"max_output_bytes", "max_data_bytes"},
 }
 
+// wantSum is the sum rule: max_wait_seconds + 2 x connect_timeout_seconds
+// must not exceed it.
+const wantSum = 120
+
 func wantLimitByKey(t testing.TB, key string) wantLimit {
 	t.Helper()
 	for _, w := range wantLimits {
@@ -371,6 +375,9 @@ func wantLimitByKey(t testing.TB, key string) wantLimit {
 	t.Fatalf("no limit %s in wantLimits", key)
 	return wantLimit{}
 }
+
+// inSum reports whether key is in the sum rule.
+func inSum(key string) bool { return key == "max_wait_seconds" || key == "connect_timeout_seconds" }
 
 // partnerOf returns the other key of the pair key is in, or "".
 func partnerOf(key string) string {
@@ -413,12 +420,29 @@ func TestParseLimits(t *testing.T) {
 		// A bound that would break a cross-field rule on its own is paired
 		// with an in-range value of the partner that keeps the rule.
 		partner := func(v int64) string {
+			extra := ""
 			other := partnerOf(w.key)
-			if other == "" {
-				return ""
+			wait := int64(60)
+			if other != "" {
+				o := wantLimitByKey(t, other)
+				pv := min(max(v, o.min), o.max)
+				extra = fmt.Sprintf(", %s: %d", other, pv)
+				if other == "max_wait_seconds" {
+					wait = pv
+				}
 			}
-			o := wantLimitByKey(t, other)
-			return fmt.Sprintf(", %s: %d", other, min(max(v, o.min), o.max))
+			if w.key == "max_wait_seconds" {
+				wait = v
+			}
+			// Keep the sum rule: max_wait_seconds + 2 x connect_timeout_seconds <= 120.
+			switch w.key {
+			case "connect_timeout_seconds":
+				mw := max(min(60, wantSum-2*v), 1)
+				extra += fmt.Sprintf(", max_wait_seconds: %d, default_wait_seconds: %d", mw, min(30, mw))
+			case "max_wait_seconds", "default_wait_seconds":
+				extra += fmt.Sprintf(", connect_timeout_seconds: %d", max(min(10, (wantSum-wait)/2), 1))
+			}
+			return extra
 		}
 		for _, c := range []struct {
 			class string
@@ -461,12 +485,32 @@ func TestParseLimits(t *testing.T) {
 			}
 		})
 	}
+	t.Run("sad/max_wait_seconds plus twice connect_timeout_seconds above 120", func(t *testing.T) {
+		text := edit(t, k.base(), "limits: {}", "limits: {max_wait_seconds: 101, connect_timeout_seconds: 10}")
+		_, err := Parse([]byte(text))
+		wantProblem(t, err, "tenants[0](default).limits.max_wait_seconds: plus twice connect_timeout_seconds must not exceed 120 (121 > 120)")
+		text = edit(t, k.base(), "limits: {}", "limits: {connect_timeout_seconds: 31}")
+		_, err = Parse([]byte(text))
+		wantProblem(t, err, "plus twice connect_timeout_seconds must not exceed 120 (122 > 120)")
+	})
+	t.Run("edge/max_wait_seconds plus twice connect_timeout_seconds equal to 120", func(t *testing.T) {
+		text := edit(t, k.base(), "limits: {}", "limits: {max_wait_seconds: 100, connect_timeout_seconds: 10}")
+		if _, err := Parse([]byte(text)); err != nil {
+			t.Fatalf("want valid, got:\n%v", err)
+		}
+	})
+	t.Run("happy/the defaults give 80", func(t *testing.T) {
+		d := DefaultLimits()
+		if d.MaxWaitSeconds+2*d.ConnectTimeoutSeconds != 80 || MaxToolSeconds != wantSum {
+			t.Fatalf("defaults %d + 2 x %d", d.MaxWaitSeconds, d.ConnectTimeoutSeconds)
+		}
+	})
 	t.Run("corner/no pair rule beyond the four of spec 5.1", func(t *testing.T) {
 		// Every in-range combination that breaks none of the four pairs is
 		// accepted: lo at its maximum, hi at its minimum, for unpaired keys.
 		for _, a := range wantLimits {
 			for _, b := range wantLimits {
-				if a.key == b.key || partnerOf(a.key) == b.key || partnerOf(a.key) != "" || partnerOf(b.key) != "" {
+				if a.key == b.key || partnerOf(a.key) == b.key || partnerOf(a.key) != "" || partnerOf(b.key) != "" || inSum(a.key) || inSum(b.key) {
 					continue
 				}
 				text := edit(t, k.base(), "limits: {}", fmt.Sprintf("limits: {%s: %d, %s: %d}", a.key, a.max, b.key, b.min))

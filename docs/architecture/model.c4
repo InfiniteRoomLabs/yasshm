@@ -80,6 +80,9 @@ model {
 
     http -> auth 'verifies every request'
     http -> tools 'dispatches tool calls'
+    http -> config 'serve loads the config at start'
+    http -> jobs 'serve opens the job engine and shuts it down'
+    http -> audit 'serve writes gateway.started and gateway.stopped'
     tools -> policy 'checks grant, access level and denylist'
     tools -> jobs 'starts, waits for, pages, lists and kills commands'
     tools -> audit 'writes tool.called before acting, policy.denied, tool.failed and the file events'

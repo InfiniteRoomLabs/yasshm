@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -46,7 +46,7 @@ const (
 	msgNoCommand       = "no such command"
 	msgNoFile          = "no such file on the server"
 	msgNotRegular      = "the path is not a regular file"
-	msgFileExists      = "the file exists; set overwrite to replace it"
+	msgFileExists      = "a file already exists at this path"
 	msgTargetDenied    = "the account on the server may not access this path"
 	msgAccessDenied    = "the server does not grant the access level this tool requires"
 	msgPolicyDenied    = "the arguments hit a guard rail (a guard rail, not a boundary)"
@@ -55,9 +55,17 @@ const (
 	msgHostKeyMismatch = "the server's host key does not match the pinned key"
 	msgTimeout         = "the operation timed out"
 	msgTooLarge        = "the result would exceed max_result_bytes"
+	msgOneCall         = "one tool call per request"
 )
 
-// ToolError is the structured content of a failed tool call (isError true).
+// codeClientClosed is the code tool.failed carries when the caller went
+// away before the answer: not a fault of the gateway, and never sent to a
+// client (nobody is there to read it).
+const codeClientClosed = "client_closed"
+
+// ToolError is a failed tool call. It travels as the only text block of a
+// result with isError true, as one line of JSON (Error), and never as
+// structured content: that would have to match the tool's output schema.
 type ToolError struct {
 	// Code is one of Codes.
 	Code string `json:"code"`
@@ -67,12 +75,14 @@ type ToolError struct {
 	Rule string `json:"rule,omitempty"`
 }
 
-// Error renders the error as its text content.
+// Error renders the error as its text block: the JSON object on one line,
+// {"code":"...","message":"...","rule":"..."} (rule only when there is one).
 func (e *ToolError) Error() string {
-	if e.Rule != "" {
-		return fmt.Sprintf("error %s: %s (rule %s)", e.Code, e.Message, e.Rule)
+	b, err := json.Marshal(e)
+	if err != nil {
+		return `{"code":"internal","message":"internal error"}`
 	}
-	return fmt.Sprintf("error %s: %s", e.Code, e.Message)
+	return string(b)
 }
 
 func toolErr(code, msg string) *ToolError { return &ToolError{Code: code, Message: msg} }
@@ -82,10 +92,23 @@ func toolErr(code, msg string) *ToolError { return &ToolError{Code: code, Messag
 var errAudit = errors.New("audit write failed")
 
 // result is a tool's successful answer: its structured content and its text
-// rendering.
+// blocks. The first block is the gateway's own rendering; any further block
+// is target data (one output stream or file content), never mixed with the
+// gateway's text, so a target cannot imitate the gateway's lines.
 type result struct {
 	structured any
-	text       string
+	blocks     []string
+}
+
+// oneBlock is a result with one gateway-written block.
+func oneBlock(structured any, s string) result {
+	return result{structured: structured, blocks: []string{s}}
+}
+
+// Decider is the policy decision a Gateway takes; *policy.Engine is one.
+type Decider interface {
+	// Decide is policy.Engine.Decide.
+	Decide(p tenant.Principal, srv *tenant.Server, tool policy.Tool, args policy.Args) policy.Decision
 }
 
 // call is the state of one tool call: who, in which tenant, and the
@@ -97,6 +120,8 @@ type call struct {
 	rec   jobs.Record
 	// budget is how many bytes the encoded result may take.
 	budget int
+	// arrived is when the request reached the gateway: waits count from it.
+	arrived time.Time
 }
 
 // plan is what a tool's prepare step found: the arguments as audited, the
@@ -115,12 +140,24 @@ type plan struct {
 // stays within max_result_bytes for any ordinary request id.
 const envelopeReserve = 512
 
+// request is what the per-request server knows about its HTTP request.
+type request struct {
+	actor   audit.Actor
+	arrived time.Time
+	// ctx is the HTTP request's context: it ends when the client goes.
+	ctx context.Context
+}
+
 // invoke is the one call path every tool takes (spec 5.8): the principal
 // from the closure, the tenant, the arguments and the target, tool.called
 // before anything else (nothing happens if it cannot be written), the policy
-// decision (policy.denied on a denial), then the action. A panic is
-// recovered, logged and answered as internal without its text.
-func (g *Gateway) invoke(ctx context.Context, a audit.Actor, d *toolDef, raw json.RawMessage) (res *mcp.CallToolResult) {
+// decision (policy.denied on a denial; a server the caller's tenant does not
+// have is answered here, before the policy engine or the SSH layer), then the
+// action. A panic is recovered, logged and answered as internal without its
+// text. A caller that went away is recorded as client_closed, not as a
+// failure of the gateway.
+func (g *Gateway) invoke(ctx context.Context, rq request, d *toolDef, raw json.RawMessage) (res *mcp.CallToolResult) {
+	a := rq.actor
 	var server tenant.ServerID
 	called := false
 	defer func() {
@@ -132,33 +169,41 @@ func (g *Gateway) invoke(ctx context.Context, a audit.Actor, d *toolDef, raw jso
 			res = g.fail(a, d.name, server, toolErr(CodeInternal, msgInternal))
 		}
 	}()
-	c, terr := g.newCall(a)
+	var p plan
+	c, terr := g.newCall(rq)
 	if terr != nil {
-		called = true
-		if err := g.audit.Write(audit.ToolCalled(a, d.name, "", audit.ToolArgs{})); err != nil {
-			return g.auditFailed(a, d.name, err)
-		}
-		return g.fail(a, d.name, "", terr)
+		p.err = terr
+	} else {
+		p = d.prepare(ctx, g, c, raw)
 	}
-	p := d.prepare(ctx, g, c, raw)
 	server = p.server
 	called = true
 	if err := g.audit.Write(audit.ToolCalled(a, d.name, p.server, p.args)); err != nil {
-		return g.auditFailed(a, d.name, err)
+		return g.auditFailed(a, d.name)
 	}
 	if p.err != nil {
 		return g.fail(a, d.name, server, g.toolError(p.err))
 	}
 	if p.policy != nil {
-		dec := g.policy.Decide(a.Principal, c.srv, d.pol, *p.policy)
+		dec := policy.Decision{Code: policy.CodeNotFound, Rule: policy.RuleServerNotFound}
+		if c.srv != nil {
+			dec = g.policy.Decide(a.Principal, c.srv, d.pol, *p.policy)
+		}
 		if !dec.Allow {
 			if err := g.audit.Write(audit.PolicyDenied(a, d.name, server, string(dec.Code), dec.Rule)); err != nil {
-				return g.auditFailed(a, d.name, err)
+				return g.auditFailed(a, d.name)
 			}
 			return errorResult(denial(dec))
 		}
 	}
 	out, err := p.act(ctx)
+	if rq.ctx != nil && rq.ctx.Err() != nil {
+		g.log.Info("caller went away", "request_id", a.RequestID, "tool", d.name)
+		if werr := g.audit.Write(audit.ToolFailed(a, d.name, server, codeClientClosed)); werr != nil {
+			g.log.Error("audit write failed", "request_id", a.RequestID, "tool", d.name, "event", audit.EventToolFailed)
+		}
+		return errorResult(toolErr(CodeInternal, msgInternal))
+	}
 	if err != nil {
 		return g.fail(a, d.name, server, g.toolError(err))
 	}
@@ -173,7 +218,8 @@ func (g *Gateway) invoke(ctx context.Context, a audit.Actor, d *toolDef, raw jso
 // newCall resolves the caller's tenant. A missing principal (a handler
 // mounted outside the guard) or a tenant the gateway does not have is
 // internal: the guard maps every principal to a configured tenant.
-func (g *Gateway) newCall(a audit.Actor) (*call, *ToolError) {
+func (g *Gateway) newCall(rq request) (*call, *ToolError) {
+	a := rq.actor
 	if a.Principal.Tenant == "" || a.RequestID == "" {
 		return nil, toolErr(CodeInternal, msgInternal)
 	}
@@ -181,7 +227,16 @@ func (g *Gateway) newCall(a audit.Actor) (*call, *ToolError) {
 	if !ok {
 		return nil, toolErr(CodeInternal, msgInternal)
 	}
-	return &call{actor: a, t: t, budget: int(t.Limits.MaxResultBytes) - envelopeReserve}, nil
+	arrived := rq.arrived
+	if arrived.IsZero() {
+		arrived = time.Now()
+	}
+	return &call{actor: a, t: t, budget: int(t.Limits.MaxResultBytes) - envelopeReserve, arrived: arrived}, nil
+}
+
+// remaining is what is left of a wait of d counted from the call's arrival.
+func (c *call) remaining(d time.Duration) time.Duration {
+	return max(d-time.Since(c.arrived), 0)
 }
 
 // denial turns a policy decision into the tool error.
@@ -212,7 +267,7 @@ func (g *Gateway) fail(a audit.Actor, tool string, server tenant.ServerID, e *To
 
 // auditFailed answers a call whose own audit event could not be written:
 // nothing was done, and the log refuses every later write until a restart.
-func (g *Gateway) auditFailed(a audit.Actor, tool string, _ error) *mcp.CallToolResult {
+func (g *Gateway) auditFailed(a audit.Actor, tool string) *mcp.CallToolResult {
 	g.log.Error("audit write failed; tool call refused", "request_id", a.RequestID, "tool", tool)
 	return errorResult(toolErr(CodeInternal, msgAudit))
 }
@@ -280,30 +335,25 @@ func (g *Gateway) fileError(err error) error {
 }
 
 // successResult renders a result: the structured content encoded once
-// (with HTML escaping, the larger form) and the text block.
+// (with HTML escaping, the larger form) and the text blocks.
 func successResult(r result) *mcp.CallToolResult {
 	b, err := json.Marshal(r.structured)
 	if err != nil {
 		return errorResult(toolErr(CodeInternal, msgInternal))
 	}
-	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: r.text}},
-		StructuredContent: json.RawMessage(b),
+	content := make([]mcp.Content, 0, len(r.blocks))
+	for _, t := range r.blocks {
+		content = append(content, &mcp.TextContent{Text: t})
 	}
+	return &mcp.CallToolResult{Content: content, StructuredContent: json.RawMessage(b)}
 }
 
-// errorResult renders a tool error: isError, the structured error and the
-// same as text.
+// errorResult renders a tool error: isError and one text block holding the
+// error as one line of JSON. No structured content: it could not match the
+// tool's output schema, and a client that validates it would turn the error
+// into a protocol error the model never sees.
 func errorResult(e *ToolError) *mcp.CallToolResult {
-	b, err := json.Marshal(e)
-	if err != nil {
-		b = []byte(`{"code":"internal","message":"internal error"}`)
-	}
-	return &mcp.CallToolResult{
-		IsError:           true,
-		Content:           []mcp.Content{&mcp.TextContent{Text: e.Error()}},
-		StructuredContent: json.RawMessage(b),
-	}
+	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: e.Error()}}}
 }
 
 // encodedLen is the size of r as the result member of a JSON-RPC response.
@@ -322,14 +372,15 @@ const fitSlack = 96
 // fit builds a result that fits c's budget. build makes the result for a
 // payload budget: the JSON cost of the output it carries, counted once
 // (fit assumes the payload appears twice, in the structured content and in
-// the text). The first try is what an empty payload leaves; a result that
-// still does not fit is rebuilt with less.
+// a text block). The first try is the smaller of what an empty payload
+// leaves and the page budget (payloadBudget, so run_command and read_output
+// agree); a result that still does not fit is rebuilt with less.
 func (c *call) fit(build func(payload int) (result, error)) (result, error) {
 	empty, err := build(0)
 	if err != nil {
 		return result{}, err
 	}
-	payload := (c.budget - encodedLen(successResult(empty)) - fitSlack) / 2
+	payload := min((c.budget-encodedLen(successResult(empty))-fitSlack)/2, c.payloadBudget())
 	for range 8 {
 		r, err := build(max(payload, 0))
 		if err != nil {

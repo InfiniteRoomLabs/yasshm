@@ -214,13 +214,16 @@ func (ks *keySet) startLocked() *fetchCall {
 		}
 		ks.inflight = nil
 		ks.mu.Unlock()
-		call.err = err
-		close(call.done)
+		// Log before the waiters are released, so a caller that sees the
+		// fetch's result also sees its log line (a test read the log
+		// empty once, under -count=2).
 		if err != nil {
 			ks.log.Warn("auth: key set fetch failed; keeping the last good keys", "reason", string(asFailure(err)), "keys_loaded", ks.ready())
 		} else {
 			ks.log.Info("auth: key set loaded", "keys", len(keys))
 		}
+		call.err = err
+		close(call.done)
 	}()
 	return call
 }

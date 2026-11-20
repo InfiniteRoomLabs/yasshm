@@ -85,7 +85,7 @@ func prepareListServers(_ context.Context, _ *Gateway, c *call, raw json.RawMess
 	return plan{act: func(context.Context) (result, error) {
 		res := ListServersResult{Servers: make([]ServerEntry, 0, len(c.t.Servers))}
 		var text strings.Builder
-		cost := encodedLen(successResult(result{structured: ListServersResult{Servers: []ServerEntry{}, Truncated: true}, text: truncNote})) + fitSlack
+		cost := encodedLen(successResult(oneBlock(ListServersResult{Servers: []ServerEntry{}, Truncated: true}, truncNote))) + fitSlack
 		for i := range c.t.Servers {
 			e := entry(&c.t.Servers[i])
 			line := serverLine(e)
@@ -105,7 +105,7 @@ func prepareListServers(_ context.Context, _ *Gateway, c *call, raw json.RawMess
 		if len(res.Servers) == 0 && !res.Truncated {
 			text.WriteString("no servers\n")
 		}
-		return result{structured: res, text: text.String()}, nil
+		return oneBlock(res, text.String()), nil
 	}}
 }
 
@@ -138,7 +138,7 @@ func prepareServerInfo(_ context.Context, g *Gateway, c *call, raw json.RawMessa
 		return plan{err: err}
 	}
 	if err := checkServerID(a.Server, true); err != nil {
-		return plan{err: err}
+		return plan{server: auditServer(a.Server), err: err}
 	}
 	c.resolveServer(a.Server)
 	return plan{server: sid(a.Server), policy: &policy.Args{}, act: func(ctx context.Context) (result, error) {
@@ -150,7 +150,7 @@ func prepareServerInfo(_ context.Context, g *Gateway, c *call, raw json.RawMessa
 // answer with reachable false and the error code.
 func (g *Gateway) serverInfo(ctx context.Context, c *call) (result, error) {
 	l := c.t.Limits
-	pctx, cancel := context.WithTimeout(ctx, time.Duration(l.ConnectTimeoutSeconds)*time.Second+probeExtra)
+	pctx, cancel := g.bounded(ctx, time.Duration(l.ConnectTimeoutSeconds)*time.Second+probeExtra)
 	defer cancel()
 	start := time.Now()
 	f, err := g.ssh[c.t.ID].Probe(pctx, c.t.ID, c.srv)
@@ -177,12 +177,12 @@ func (g *Gateway) serverInfo(ctx context.Context, c *call) (result, error) {
 // shrinkInfo returns the first form of res that fits the budget: whole;
 // with a short text; with each fact cut; without description and tags.
 func (c *call) shrinkInfo(res ServerInfoResult) result {
-	r := result{structured: res, text: serverInfoText(res, true)}
+	r := oneBlock(res, serverInfoText(res, true))
 	if encodedLen(successResult(r)) <= c.budget {
 		return r
 	}
 	res.Truncated = true
-	r = result{structured: res, text: serverInfoText(res, false)}
+	r = oneBlock(res, serverInfoText(res, false))
 	if encodedLen(successResult(r)) <= c.budget {
 		return r
 	}
@@ -192,12 +192,12 @@ func (c *call) shrinkInfo(res ServerInfoResult) result {
 		f.Kernel, f.Arch, f.OS = cut(f.Kernel), cut(f.Arch), cut(f.OS)
 		res.Facts = &f
 	}
-	r = result{structured: res, text: serverInfoText(res, false)}
+	r = oneBlock(res, serverInfoText(res, false))
 	if encodedLen(successResult(r)) <= c.budget {
 		return r
 	}
 	res.Description, res.Tags = "", nil
-	return result{structured: res, text: serverInfoText(res, false)}
+	return oneBlock(res, serverInfoText(res, false))
 }
 
 // serverInfoText renders the answer; the short form leaves the

@@ -97,7 +97,7 @@ func TestPanicRecovered(t *testing.T) {
 		panic("secret panic text")
 	}}
 	a := audit.Actor{RequestID: "rid-panic", Principal: tenant.Principal{Tenant: tA, Kind: tenant.KindUser, Subject: userA}}
-	res := h.gw.invoke(t.Context(), a, d, nil)
+	res := h.gw.invoke(t.Context(), request{actor: a}, d, nil)
 	e := wantErr(t, res, CodeInternal, "")
 	if strings.Contains(e.Message, "secret") || strings.Contains(h.logs.String(), "secret panic text") {
 		t.Fatal("the panic text escaped")
@@ -110,19 +110,19 @@ func TestPanicRecovered(t *testing.T) {
 		d := &toolDef{name: "boom2", prepare: func(context.Context, *Gateway, *call, json.RawMessage) plan {
 			return plan{act: func(context.Context) (result, error) { panic("later") }}
 		}}
-		wantErr(t, h.gw.invoke(t.Context(), a, d, nil), CodeInternal, "")
+		wantErr(t, h.gw.invoke(t.Context(), request{actor: a}, d, nil), CodeInternal, "")
 	})
 	t.Run("sad/no principal is internal", func(t *testing.T) {
-		wantErr(t, h.gw.invoke(t.Context(), audit.Actor{RequestID: "r"}, toolDefs()[0], nil), CodeInternal, "")
-		wantErr(t, h.gw.invoke(t.Context(), audit.Actor{RequestID: "r", Principal: tenant.Principal{Tenant: "ghost", Kind: tenant.KindUser, Subject: "x"}}, toolDefs()[0], nil), CodeInternal, "")
+		wantErr(t, h.gw.invoke(t.Context(), request{actor: audit.Actor{RequestID: "r"}}, toolDefs()[0], nil), CodeInternal, "")
+		wantErr(t, h.gw.invoke(t.Context(), request{actor: audit.Actor{RequestID: "r", Principal: tenant.Principal{Tenant: "ghost", Kind: tenant.KindUser, Subject: "x"}}}, toolDefs()[0], nil), CodeInternal, "")
 	})
 	t.Run("sad/a result over the budget is refused", func(t *testing.T) {
 		d := &toolDef{name: "huge", prepare: func(context.Context, *Gateway, *call, json.RawMessage) plan {
 			return plan{act: func(context.Context) (result, error) {
-				return result{structured: map[string]string{"x": strings.Repeat("y", 200000)}, text: "z"}, nil
+				return oneBlock(map[string]string{"x": strings.Repeat("y", 200000)}, "z"), nil
 			}}
 		}}
-		e := wantErr(t, h.gw.invoke(t.Context(), a, d, nil), CodeInternal, "")
+		e := wantErr(t, h.gw.invoke(t.Context(), request{actor: a}, d, nil), CodeInternal, "")
 		if e.Message != msgTooLarge {
 			t.Fatalf("message = %q", e.Message)
 		}
@@ -138,7 +138,7 @@ func TestNewRefuses(t *testing.T) {
 		"sad/duplicate tenant": func(c *Config) { c.Tenants = []tenant.Tenant{h.tenants[0], h.tenants[0]} },
 		"sad/tiny result cap": func(c *Config) {
 			ts := []tenant.Tenant{h.tenants[0]}
-			ts[0].Limits.MaxResultBytes = 100
+			ts[0].Limits.MaxResultBytes = MinResultBytes - 1
 			c.Tenants = ts
 		},
 	} {
@@ -166,12 +166,12 @@ func TestFitText(t *testing.T) {
 		{"edge/budget cuts", "abcdef", 3, true, "abc", 3, false},
 		{"edge/escapes cost more", "<<<", 12, true, "<<", 2, false},
 		{"edge/control characters", "\x01\x02", 6, true, "\x01", 1, false},
-		{"happy/invalid byte replaced", "a\xffb", 100, true, "a�b", 3, true},
+		{"happy/invalid byte replaced", "a\xffb", 100, true, "a\ufffdb", 3, true},
 		{"edge/split character held back", "a\xc3", 100, false, "a", 1, false},
-		{"edge/split character at the end of the stream replaced", "a\xc3", 100, true, "a�", 2, true},
-		{"edge/a lone partial character moves on", "\xc3", 100, false, "�", 1, true},
+		{"edge/split character at the end of the stream replaced", "a\xc3", 100, true, "a\ufffd", 2, true},
+		{"edge/a lone partial character moves on", "\xc3", 100, false, "\ufffd", 1, true},
 		{"edge/zero budget", "abc", 0, true, "", 0, false},
-		{"edge/a valid replacement character is not lossy", "�", 100, true, "�", 3, false},
+		{"edge/a valid replacement character is not lossy", "\ufffd", 100, true, "\ufffd", 3, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := fitText([]byte(tc.in), tc.budget, tc.final)
@@ -187,7 +187,7 @@ func TestFitText(t *testing.T) {
 }
 
 func FuzzFitText(f *testing.F) {
-	for _, s := range []string{"abc", "a\xffb", "<>&\"\\\n\t\x00", " é\xc3", strings.Repeat("\xe2\x82", 7)} {
+	for _, s := range []string{"abc", "a\xffb", "<>&\"\\\n\t\x00", "\u2028\u00e9\xc3", strings.Repeat("\xe2\x82", 7)} {
 		f.Add([]byte(s), 10, true)
 	}
 	f.Fuzz(func(t *testing.T, data []byte, budget int, final bool) {
@@ -246,6 +246,6 @@ func BenchmarkNewServer(b *testing.B) {
 	a := audit.Actor{RequestID: "r", Principal: tenant.Principal{Tenant: tA, Kind: tenant.KindUser, Subject: userA}}
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = g.newServer(a)
+		_ = g.newServer(request{actor: a})
 	}
 }

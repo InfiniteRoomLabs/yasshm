@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
 	"github.com/InfiniteRoomLabs/yasshm/internal/tenant"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/leakcheck"
 	"github.com/InfiniteRoomLabs/yasshm/internal/testkit/loopback"
@@ -56,6 +57,18 @@ func (h *harness) waitDone(t *testing.T, who, id string) ReadResult {
 		t.Fatalf("command %s still running: %+v", id, r)
 	}
 	return r
+}
+
+// stages returns the stages of the file events named event for path.
+func (h *harness) stages(t *testing.T, event, path string) []string {
+	t.Helper()
+	var out []string
+	for _, l := range h.au.lines(t) {
+		if l.Event == event && l.Path == path {
+			out = append(out, l.Stage)
+		}
+	}
+	return out
 }
 
 func TestListServers(t *testing.T) {
@@ -167,16 +180,20 @@ func TestRunCommand(t *testing.T) {
 		if r.Status != "failed" || *r.ExitCode != 3 || r.Stdout != "out\n" || r.Stderr != "err\n" || r.StderrNextOffset != 4 || r.MergeStderr {
 			t.Fatalf("run = %+v", r)
 		}
-		txt := text(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": r.CommandID, "stream": "stderr"}))
-		if !strings.HasSuffix(txt, "\nerr\n") {
-			t.Fatalf("stderr text = %q", txt)
+		b := blocks(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": r.CommandID, "stream": "stderr"}))
+		if len(b) != 2 || b[1] != "err\n" || !strings.HasSuffix(b[0], "; stderr bytes 0..4 of 4, eof\n") {
+			t.Fatalf("stderr blocks = %q", b)
+		}
+		rb := blocks(t, h.call(t, userA, ToolRunCommand, map[string]any{"server": "srv-1", "command": "echo out; echo err >&2", "merge_stderr": false}))
+		if len(rb) != 3 || rb[1] != "out\n" || rb[2] != "err\n" || !strings.Contains(rb[0], "; stdout bytes 0..4 of 4, eof; stderr bytes 0..4 of 4, eof\n") {
+			t.Fatalf("run blocks = %q", rb)
 		}
 	})
-	t.Run("happy/the text is a status line and the output", func(t *testing.T) {
+	t.Run("happy/the gateway's header block, then the output block", func(t *testing.T) {
 		res := h.call(t, userA, ToolRunCommand, map[string]any{"server": "srv-1", "command": "printf 'a<b>&c'"})
-		got := text(t, res)
-		if !strings.Contains(got, ": succeeded, exit code 0; stdout bytes 0..6 of 6, eof\na<b>&c") {
-			t.Fatalf("text = %q", got)
+		b := blocks(t, res)
+		if len(b) != 2 || !strings.HasSuffix(b[0], ": succeeded, exit code 0; stdout bytes 0..6 of 6, eof\n") || b[1] != "a<b>&c" {
+			t.Fatalf("blocks = %q", b)
 		}
 	})
 	t.Run("happy/equals read_output at offset 0", func(t *testing.T) {
@@ -317,6 +334,12 @@ func TestRunCommandClientGone(t *testing.T) {
 	if rr.Data != "survived\n" {
 		t.Fatalf("output = %q", rr.Data)
 	}
+	got := h.events(t, func(l auditLine) bool {
+		return l.Event == audit.EventToolFailed && l.Tool == ToolRunCommand && l.Code == codeClientClosed
+	})
+	if len(got) != 1 || strings.Contains(h.logs.String(), `"msg":"tool failed"`) {
+		t.Fatalf("client_closed events %v; logs:\n%s", got, h.logs.String())
+	}
 }
 
 func TestReadOutput(t *testing.T) {
@@ -349,7 +372,7 @@ func TestReadOutput(t *testing.T) {
 		r := h.run(t, userA, "srv-1", `printf 'a\377b'`, nil)
 		var rr ReadResult
 		decode(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": r.CommandID}), &rr)
-		if rr.Data != "a�b" || !rr.Lossy || !r.Lossy || rr.NextOffset != 3 {
+		if rr.Data != "a\ufffdb" || !rr.Lossy || !r.Lossy || rr.NextOffset != 3 {
 			t.Fatalf("read = %+v", rr)
 		}
 	})
@@ -358,7 +381,7 @@ func TestReadOutput(t *testing.T) {
 		var p1, p2 ReadResult
 		decode(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": r.CommandID, "max_bytes": 2}), &p1)
 		decode(t, h.call(t, userA, ToolReadOutput, map[string]any{"command_id": r.CommandID, "offset": p1.NextOffset}), &p2)
-		if p1.Data != "x" || p1.NextOffset != 1 || p1.Lossy || p2.Data != "éy" || p2.Lossy {
+		if p1.Data != "x" || p1.NextOffset != 1 || p1.Lossy || p2.Data != "\u00e9y" || p2.Lossy {
 			t.Fatalf("pages %+v %+v", p1, p2)
 		}
 	})
@@ -503,12 +526,12 @@ func TestDownloadFile(t *testing.T) {
 		}
 		return p
 	}
-	txt := write("notes.txt", []byte("hello <world> & é\n"))
+	txt := write("notes.txt", []byte("hello <world> & \u00e9\n"))
 	bin := write("blob.bin", []byte{0, 1, 2, 0xff, 0xfe})
 	t.Run("happy/text", func(t *testing.T) {
 		var r DownloadResult
 		decode(t, h.call(t, userA, ToolDownloadFile, map[string]any{"server": "srv-1", "path": txt}), &r)
-		if r.Encoding != "text" || r.Data != "hello <world> & é\n" || !r.EOF || r.Size != 19 || r.NextOffset != 19 || r.DataBase64 != "" {
+		if r.Encoding != "text" || r.Data != "hello <world> & \u00e9\n" || !r.EOF || r.Size != 19 || r.NextOffset != 19 || r.DataBase64 != "" {
 			t.Fatalf("download = %+v", r)
 		}
 	})
@@ -528,12 +551,7 @@ func TestDownloadFile(t *testing.T) {
 		}
 	})
 	t.Run("happy/audited before and after", func(t *testing.T) {
-		var stages []string
-		for _, l := range h.au.lines(t) {
-			if l.Event == "file.downloaded" && l.Path == txt {
-				stages = append(stages, l.Stage)
-			}
-		}
+		stages := h.stages(t, "file.downloaded", txt)
 		if len(stages) < 2 || stages[0] != "requested" || stages[1] != "done" {
 			t.Fatalf("stages = %v", stages)
 		}
@@ -585,12 +603,7 @@ func TestUploadFile(t *testing.T) {
 		if err != nil || string(got) != "uploaded\n" || r.BytesWritten != 9 || r.Path != p {
 			t.Fatalf("upload %+v, file %q %v", r, got, err)
 		}
-		var stages []string
-		for _, l := range h.au.lines(t) {
-			if l.Event == "file.uploaded" && l.Path == p {
-				stages = append(stages, l.Stage)
-			}
-		}
+		stages := h.stages(t, "file.uploaded", p)
 		if len(stages) != 2 || stages[0] != "requested" || stages[1] != "done" {
 			t.Fatalf("stages = %v", stages)
 		}

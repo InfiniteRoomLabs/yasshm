@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -168,22 +169,20 @@ func prepareRun(_ context.Context, g *Gateway, c *call, raw json.RawMessage) pla
 	if err := decodeArgs(raw, []string{"server", "command", "wait_seconds", "timeout_seconds", "merge_stderr", "max_bytes"}, maxArgBytes, &a); err != nil {
 		return plan{err: err}
 	}
-	p := plan{
-		server: sid(a.Server), policy: &policy.Args{Command: a.Command},
-		args: audit.ToolArgs{Command: a.Command, WaitSeconds: a.WaitSeconds, TimeoutSeconds: a.TimeoutSeconds, MergeStderr: a.MergeStderr, MaxBytes: a.MaxBytes},
-	}
 	l := c.t.Limits
-	switch {
-	case checkServerID(a.Server, true) != nil:
-		p.err = checkServerID(a.Server, true)
-	case checkNonNegative(a.WaitSeconds, "wait_seconds") != nil:
-		p.err = checkNonNegative(a.WaitSeconds, "wait_seconds")
-	case checkNonNegative(a.TimeoutSeconds, "timeout_seconds") != nil:
-		p.err = checkNonNegative(a.TimeoutSeconds, "timeout_seconds")
-	case a.TimeoutSeconds != nil && *a.TimeoutSeconds > l.MaxTimeoutSeconds:
-		p.err = argError("timeout_seconds must not be above the tenant's max_timeout_seconds")
-	case checkNonNegative(a.MaxBytes, "max_bytes") != nil:
-		p.err = checkNonNegative(a.MaxBytes, "max_bytes")
+	p := plan{
+		server: auditServer(a.Server), policy: &policy.Args{Command: a.Command},
+		args: audit.ToolArgs{
+			Command: auditText(a.Command, int(l.MaxCommandBytes)), WaitSeconds: a.WaitSeconds,
+			TimeoutSeconds: a.TimeoutSeconds, MergeStderr: a.MergeStderr, MaxBytes: a.MaxBytes,
+		},
+		err: cmp.Or(
+			checkServerID(a.Server, true),
+			checkNonNegative(a.WaitSeconds, "wait_seconds"),
+			checkNonNegative(a.TimeoutSeconds, "timeout_seconds"),
+			argIf(a.TimeoutSeconds != nil && *a.TimeoutSeconds > l.MaxTimeoutSeconds, "timeout_seconds must not be above the tenant's max_timeout_seconds"),
+			checkNonNegative(a.MaxBytes, "max_bytes"),
+		),
 	}
 	if p.err != nil {
 		return p
@@ -203,8 +202,11 @@ func prepareRun(_ context.Context, g *Gateway, c *call, raw json.RawMessage) pla
 		if err != nil {
 			return result{}, err
 		}
-		if wait > 0 {
-			if _, err := g.jobs.Wait(ctx, c.t.ID, rec.ID, secs(wait)); err != nil {
+		// The wait counts from the call's arrival: a slow start eats into
+		// it, so the answer comes wait_seconds after arrival, or right after
+		// a start that took longer.
+		if rem := c.remaining(secs(wait)); rem > 0 {
+			if _, err := g.jobs.Wait(ctx, c.t.ID, rec.ID, rem); err != nil {
 				return result{}, err
 			}
 		}
@@ -213,7 +215,27 @@ func prepareRun(_ context.Context, g *Gateway, c *call, raw json.RawMessage) pla
 	return p
 }
 
-// runPage reads both streams at offset 0 and renders run_command's answer.
+// pageHead is the gateway's own block of an output page: the status line
+// and, per stream, the bytes shown, the stream size and the flags.
+func pageHead(st CommandStatus, pages ...string) string {
+	return statusLine(st) + "; " + strings.Join(pages, "; ") + "\n"
+}
+
+// pageSpan renders one stream's span for pageHead.
+func pageSpan(stream string, from, to, size int64, lossy, eof bool) string {
+	s := fmt.Sprintf("%s bytes %d..%d of %d", stream, from, to, size)
+	if lossy {
+		s += ", lossy"
+	}
+	if eof {
+		s += ", eof"
+	}
+	return s
+}
+
+// runPage reads both streams at offset 0 and renders run_command's answer:
+// the gateway's header block, then the stdout block, then (unmerged) the
+// stderr block.
 func (g *Gateway) runPage(ctx context.Context, c *call, id tenant.CommandID, maxBytes *int64) (result, error) {
 	n := c.clampBytes(maxBytes)
 	out, err := g.jobs.ReadOutput(ctx, c.t.ID, id, jobs.ReadRequest{Stream: jobs.StreamStdout, MaxBytes: n})
@@ -226,7 +248,6 @@ func (g *Gateway) runPage(ctx context.Context, c *call, id tenant.CommandID, max
 	}
 	rec := out.Record
 	return c.fit(func(payload int) (result, error) {
-		payload = min(payload, c.payloadBudget())
 		so := fitText(out.Data, payload, out.EOF)
 		se := fitText(errOut.Data, payload-jsonStringCost(so.text)+2, errOut.EOF)
 		r := RunResult{
@@ -237,22 +258,14 @@ func (g *Gateway) runPage(ctx context.Context, c *call, id tenant.CommandID, max
 			Lossy: so.lossy || se.lossy, Truncated: rec.Truncated,
 			StdoutBytes: rec.StdoutBytes, StderrBytes: rec.StderrBytes,
 		}
-		var b strings.Builder
-		b.WriteString(statusLine(r.CommandStatus))
-		fmt.Fprintf(&b, "; stdout bytes 0..%d of %d", r.NextOffset, out.Size)
-		if r.Lossy {
-			b.WriteString(", lossy")
+		if rec.MergeStderr {
+			head := pageHead(r.CommandStatus, pageSpan("stdout", 0, r.NextOffset, out.Size, r.Lossy, r.EOF))
+			return result{structured: r, blocks: []string{head, r.Stdout}}, nil
 		}
-		if r.EOF {
-			b.WriteString(", eof")
-		}
-		b.WriteString("\n")
-		b.WriteString(r.Stdout)
-		if !rec.MergeStderr {
-			fmt.Fprintf(&b, "\n--- stderr bytes 0..%d of %d ---\n", r.StderrNextOffset, errOut.Size)
-			b.WriteString(r.Stderr)
-		}
-		return result{structured: r, text: b.String()}, nil
+		head := pageHead(r.CommandStatus,
+			pageSpan("stdout", 0, r.NextOffset, out.Size, so.lossy, out.EOF && so.used == len(out.Data)),
+			pageSpan("stderr", 0, r.StderrNextOffset, errOut.Size, se.lossy, errOut.EOF && se.used == len(errOut.Data)))
+		return result{structured: r, blocks: []string{head, r.Stdout, r.Stderr}}, nil
 	})
 }
 
@@ -268,24 +281,32 @@ func (c *call) resolveCommand(ctx context.Context, g *Gateway, id string) error 
 	return nil
 }
 
+// auditCommandID is a command_id for the audit log: as given when it is
+// well-formed, else auditInvalid.
+func auditCommandID(id string) tenant.CommandID {
+	return tenant.CommandID(auditEnum(id, commandIDPattern.MatchString(id)))
+}
+
 func prepareRead(ctx context.Context, g *Gateway, c *call, raw json.RawMessage) plan {
 	var a readArgs
 	if err := decodeArgs(raw, []string{"command_id", "stream", "offset", "max_bytes", "wait_seconds"}, maxArgBytes, &a); err != nil {
 		return plan{err: err}
 	}
-	p := plan{args: audit.ToolArgs{CommandID: tenant.CommandID(a.CommandID), Stream: a.Stream, Offset: a.Offset, MaxBytes: a.MaxBytes, WaitSeconds: a.WaitSeconds}}
+	validStream := a.Stream == "" || a.Stream == jobs.StreamStdout || a.Stream == jobs.StreamStderr
+	p := plan{
+		args: audit.ToolArgs{
+			CommandID: auditCommandID(a.CommandID), Stream: auditEnum(a.Stream, validStream),
+			Offset: a.Offset, MaxBytes: a.MaxBytes, WaitSeconds: a.WaitSeconds,
+		},
+		err: cmp.Or(
+			checkCommandID(a.CommandID),
+			argIf(!validStream, "stream must be stdout or stderr"),
+			checkNonNegative(a.MaxBytes, "max_bytes"),
+			checkNonNegative(a.WaitSeconds, "wait_seconds"),
+		),
+	}
 	if a.Stream == "" {
 		a.Stream = jobs.StreamStdout
-	}
-	switch {
-	case checkCommandID(a.CommandID) != nil:
-		p.err = checkCommandID(a.CommandID)
-	case a.Stream != jobs.StreamStdout && a.Stream != jobs.StreamStderr:
-		p.err = argError("stream must be stdout or stderr")
-	case checkNonNegative(a.MaxBytes, "max_bytes") != nil:
-		p.err = checkNonNegative(a.MaxBytes, "max_bytes")
-	case checkNonNegative(a.WaitSeconds, "wait_seconds") != nil:
-		p.err = checkNonNegative(a.WaitSeconds, "wait_seconds")
 	}
 	if p.err != nil {
 		return p
@@ -301,7 +322,7 @@ func prepareRead(ctx context.Context, g *Gateway, c *call, raw json.RawMessage) 
 			req.Offset = *a.Offset
 		}
 		if a.WaitSeconds != nil {
-			req.Wait = secs(min(*a.WaitSeconds, c.t.Limits.MaxWaitSeconds))
+			req.Wait = c.remaining(secs(min(*a.WaitSeconds, c.t.Limits.MaxWaitSeconds)))
 		}
 		out, err := g.jobs.ReadOutput(ctx, c.t.ID, c.rec.ID, req)
 		if err != nil {
@@ -309,25 +330,14 @@ func prepareRead(ctx context.Context, g *Gateway, c *call, raw json.RawMessage) 
 		}
 		rec := out.Record
 		return c.fit(func(payload int) (result, error) {
-			payload = min(payload, c.payloadBudget())
 			t := fitText(out.Data, payload, out.EOF)
 			r := ReadResult{
 				CommandStatus: status(&rec), Stream: a.Stream, Offset: out.Start, Data: t.text,
 				NextOffset: out.Start + int64(t.used), Size: out.Size,
 				EOF: out.EOF && t.used == len(out.Data), Lossy: t.lossy, Truncated: rec.Truncated,
 			}
-			var b strings.Builder
-			b.WriteString(statusLine(r.CommandStatus))
-			fmt.Fprintf(&b, "; %s bytes %d..%d of %d", r.Stream, r.Offset, r.NextOffset, r.Size)
-			if r.Lossy {
-				b.WriteString(", lossy")
-			}
-			if r.EOF {
-				b.WriteString(", eof")
-			}
-			b.WriteString("\n")
-			b.WriteString(r.Data)
-			return result{structured: r, text: b.String()}, nil
+			head := pageHead(r.CommandStatus, pageSpan(r.Stream, r.Offset, r.NextOffset, r.Size, r.Lossy, r.EOF))
+			return result{structured: r, blocks: []string{head, r.Data}}, nil
 		})
 	}
 	return p
@@ -338,16 +348,18 @@ func prepareList(_ context.Context, g *Gateway, c *call, raw json.RawMessage) pl
 	if err := decodeArgs(raw, []string{"server", "status", "limit", "cursor"}, maxArgBytes, &a); err != nil {
 		return plan{err: err}
 	}
-	p := plan{server: sid(a.Server), args: audit.ToolArgs{Status: a.Status, Limit: a.Limit, Cursor: a.Cursor}}
-	switch {
-	case checkServerID(a.Server, false) != nil:
-		p.err = checkServerID(a.Server, false)
-	case checkStatus(a.Status) != nil:
-		p.err = checkStatus(a.Status)
-	case a.Limit != nil && (*a.Limit < 1 || *a.Limit > 100):
-		p.err = argError("limit must be 1 to 100")
-	case a.Cursor != "" && !cursorPattern.MatchString(a.Cursor):
-		p.err = argError("cursor is not one list_commands returned")
+	p := plan{
+		server: auditServer(a.Server),
+		args: audit.ToolArgs{
+			Status: auditEnum(a.Status, checkStatus(a.Status) == nil), Limit: a.Limit,
+			Cursor: auditEnum(a.Cursor, cursorPattern.MatchString(a.Cursor)),
+		},
+		err: cmp.Or(
+			checkServerID(a.Server, false),
+			checkStatus(a.Status),
+			argIf(a.Limit != nil && (*a.Limit < 1 || *a.Limit > 100), "limit must be 1 to 100"),
+			argIf(a.Cursor != "" && !cursorPattern.MatchString(a.Cursor), "cursor is not one list_commands returned"),
+		),
 	}
 	if p.err != nil {
 		return p
@@ -368,10 +380,20 @@ func prepareList(_ context.Context, g *Gateway, c *call, raw json.RawMessage) pl
 	return p
 }
 
-// listPage lists one page and, when it does not fit the result budget,
-// lists again with a smaller limit, so next_cursor continues right after
-// the last command shown.
+// cursorReserve is the longest next_cursor a page budgets for (a jobs
+// cursor is "c1." and base64url of a time and an id, about 50 characters).
+const cursorReserve = 128
+
+// listPage lists one page that fits the result budget, never hiding a
+// command: the first entry always fits (its command excerpt is shortened
+// until it does), a page holds at least one entry when one exists, and when
+// fewer entries fit than were listed it lists again with that limit, so
+// next_cursor continues right after the last command shown. The budget
+// counts a next_cursor whether or not the page has one, so the second
+// listing fits what the first one measured.
 func (g *Gateway) listPage(ctx context.Context, c *call, f jobs.ListFilter) (result, error) {
+	reserve := strings.Repeat("A", cursorReserve)
+	base := encodedLen(successResult(oneBlock(ListCommandsResult{Commands: []CommandEntry{}, NextCursor: reserve}, cursorLine(reserve)))) + fitSlack
 	for range 4 {
 		page, err := g.jobs.List(ctx, c.t.ID, f)
 		if err != nil {
@@ -379,24 +401,27 @@ func (g *Gateway) listPage(ctx context.Context, c *call, f jobs.ListFilter) (res
 		}
 		res := ListCommandsResult{Commands: make([]CommandEntry, 0, len(page.Records)), NextCursor: page.NextCursor}
 		var text strings.Builder
-		cost := encodedLen(successResult(result{structured: res, text: "no commands\n"})) + fitSlack
-		fits := len(page.Records)
+		cost, fits := base, len(page.Records)
 		for i := range page.Records {
 			e := commandEntry(&page.Records[i])
-			line := commandLine(e)
-			b, err := json.Marshal(e)
+			ec, err := entryCost(e)
 			if err != nil {
 				return result{}, err
 			}
-			cost += len(b) + 1 + jsonStringCost(line) - 2
-			if cost > c.budget {
-				fits = i
-				break
+			if cost+ec > c.budget {
+				if i > 0 {
+					fits = i
+					break
+				}
+				if e, ec, err = shrinkEntry(e, c.budget-cost); err != nil {
+					return result{}, err
+				}
 			}
+			cost += ec
 			res.Commands = append(res.Commands, e)
-			text.WriteString(line)
+			text.WriteString(commandLine(e))
 		}
-		if fits < len(page.Records) && fits > 0 {
+		if fits < len(page.Records) {
 			f.Limit = fits
 			continue
 		}
@@ -404,11 +429,50 @@ func (g *Gateway) listPage(ctx context.Context, c *call, f jobs.ListFilter) (res
 			text.WriteString("no commands\n")
 		}
 		if res.NextCursor != "" {
-			text.WriteString("more: pass next_cursor " + res.NextCursor + "\n")
+			text.WriteString(cursorLine(res.NextCursor))
 		}
-		return result{structured: res, text: text.String()}, nil
+		return oneBlock(res, text.String()), nil
 	}
 	return result{}, toolErr(CodeInternal, msgTooLarge)
+}
+
+func cursorLine(cursor string) string { return "more: pass next_cursor " + cursor + "\n" }
+
+// entryCost is what one entry adds to a list result: its JSON in the
+// structured content and its line in the text block.
+func entryCost(e CommandEntry) (int, error) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return 0, err
+	}
+	return len(b) + 1 + jsonStringCost(commandLine(e)) - 2, nil
+}
+
+// shrinkEntry shortens e's command excerpt to the most characters whose
+// entry costs at most avail. Even an empty excerpt that does not fit is
+// internal (a result budget this small is refused at New).
+func shrinkEntry(e CommandEntry, avail int) (CommandEntry, int, error) {
+	runes := []rune(e.Command)
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		t := e
+		t.Command, t.CommandTruncated = string(runes[:mid]), true
+		if ec, err := entryCost(t); err == nil && ec <= avail {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	e.Command, e.CommandTruncated = string(runes[:lo]), true
+	ec, err := entryCost(e)
+	if err != nil {
+		return e, 0, err
+	}
+	if ec > avail {
+		return e, 0, toolErr(CodeInternal, msgTooLarge)
+	}
+	return e, ec, nil
 }
 
 func stamp(t time.Time) string {
@@ -440,15 +504,13 @@ func prepareKill(ctx context.Context, g *Gateway, c *call, raw json.RawMessage) 
 	if err := decodeArgs(raw, []string{"command_id", "signal"}, maxArgBytes, &a); err != nil {
 		return plan{err: err}
 	}
-	p := plan{args: audit.ToolArgs{CommandID: tenant.CommandID(a.CommandID), Signal: a.Signal}}
+	validSignal := a.Signal == "" || a.Signal == jobs.SignalTerm || a.Signal == jobs.SignalInt || a.Signal == jobs.SignalKill
+	p := plan{
+		args: audit.ToolArgs{CommandID: auditCommandID(a.CommandID), Signal: auditEnum(a.Signal, validSignal)},
+		err:  cmp.Or(checkCommandID(a.CommandID), argIf(!validSignal, "signal must be TERM, INT or KILL")),
+	}
 	if a.Signal == "" {
 		a.Signal = jobs.SignalTerm
-	}
-	switch {
-	case checkCommandID(a.CommandID) != nil:
-		p.err = checkCommandID(a.CommandID)
-	case a.Signal != jobs.SignalTerm && a.Signal != jobs.SignalInt && a.Signal != jobs.SignalKill:
-		p.err = argError("signal must be TERM, INT or KILL")
 	}
 	if p.err != nil {
 		return p
@@ -470,7 +532,7 @@ func prepareKill(ctx context.Context, g *Gateway, c *call, raw json.RawMessage) 
 		} else {
 			text += "; no signal delivered\n"
 		}
-		return result{structured: r, text: text}, nil
+		return oneBlock(r, text), nil
 	}
 	return p
 }

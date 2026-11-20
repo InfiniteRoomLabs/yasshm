@@ -49,7 +49,9 @@ func (s *syncBuffer) String() string {
 // serveFixture is a config for serve against an sshtest target and the
 // local issuer, with a private data directory and audit log.
 type serveFixture struct {
-	ssh     *sshtest.Server
+	ssh *sshtest.Server
+	// slow answers SSH two seconds late, to hold a transfer in flight.
+	slow    *sshtest.Server
 	is      *accesstest.Issuer
 	dataDir string
 	audit   string
@@ -58,7 +60,10 @@ type serveFixture struct {
 
 func newServeFixture(t *testing.T, listen string) *serveFixture {
 	t.Helper()
-	f := &serveFixture{ssh: sshtest.Start(t, sshtest.Options{}), is: accesstest.New(t, nil), dataDir: leakcheck.PrivDir(t)}
+	f := &serveFixture{
+		ssh: sshtest.Start(t, sshtest.Options{}), slow: sshtest.Start(t, sshtest.Options{SlowBanner: 2 * time.Second}),
+		is: accesstest.New(t, nil), dataDir: leakcheck.PrivDir(t),
+	}
 	f.audit = filepath.Join(leakcheck.PrivDir(t), "audit.jsonl")
 	f.config = f.write(t, listen, f.dataDir, f.audit)
 	return f
@@ -83,11 +88,14 @@ tenants:
     principals: [{email: %s}]
     identities:
       look: {user: %s, private_key_file: %s}
+      slow: {user: %s, private_key_file: %s}
     servers:
       - {id: lab-1, host: 127.0.0.1, port: %d, identity: look, host_key: %q, access: look}
+      - {id: slow-1, host: 127.0.0.1, port: %d, identity: slow, host_key: %q, access: look}
     limits: {kill_grace_seconds: 1, shutdown_grace_seconds: 5, default_wait_seconds: 1}
 `, listen, dataDir, auditLog, accesstest.TeamDomain, accesstest.Audience, f.is.CertsURL(), operator,
-		f.ssh.User, f.ssh.ClientKeyFile, f.ssh.Port, f.ssh.HostKeyLine())
+		f.ssh.User, f.ssh.ClientKeyFile, f.slow.User, f.slow.ClientKeyFile,
+		f.ssh.Port, f.ssh.HostKeyLine(), f.slow.Port, f.slow.HostKeyLine())
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -228,21 +236,21 @@ func TestServe(t *testing.T) {
 	}
 	var commandID string
 	t.Run("happy/a tool call through the edge", func(t *testing.T) {
-		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "run_command", Arguments: map[string]any{
+		res, cerr := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "run_command", Arguments: map[string]any{
 			"server": "lab-1", "command": "echo serving; sleep 30", "wait_seconds": 0,
 		}})
-		if err != nil || res.IsError {
-			t.Fatalf("run_command: %v %+v", err, res)
+		if cerr != nil || res.IsError {
+			t.Fatalf("run_command: %v %+v", cerr, res)
 		}
-		b, err := json.Marshal(res.StructuredContent)
-		if err != nil {
-			t.Fatal(err)
+		b, merr := json.Marshal(res.StructuredContent)
+		if merr != nil {
+			t.Fatal(merr)
 		}
 		var out struct {
 			CommandID string `json:"command_id"`
 			Status    string `json:"status"`
 		}
-		if err := json.Unmarshal(b, &out); err != nil || out.Status != "running" {
+		if uerr := json.Unmarshal(b, &out); uerr != nil || out.Status != "running" {
 			t.Fatalf("run = %s", b)
 		}
 		commandID = out.CommandID
@@ -258,6 +266,49 @@ func TestServe(t *testing.T) {
 			t.Fatalf("stderr:\n%s", r2.stderr.String())
 		}
 	})
+	// In flight when the signal comes: a run_command waiting on its
+	// command, and a download from a target that answers two seconds late.
+	slowFile := filepath.Join(f.slow.Root, "data.txt")
+	if werr := os.WriteFile(slowFile, []byte("slow data"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	cs2, err := c.Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: edge.URL + "/mcp", DisableStandaloneSSE: true, MaxRetries: -1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs2.Close() }()
+	type answer struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	waiting, transfer := make(chan answer, 1), make(chan answer, 1)
+	go func() {
+		res, err := cs2.CallTool(context.WithoutCancel(t.Context()), &mcp.CallToolParams{Name: "run_command", Arguments: map[string]any{
+			"server": "lab-1", "command": "sleep 30", "wait_seconds": 10,
+		}})
+		waiting <- answer{res, err}
+	}()
+	go func() {
+		res, err := cs2.CallTool(context.WithoutCancel(t.Context()), &mcp.CallToolParams{Name: "download_file", Arguments: map[string]any{
+			"server": "slow-1", "path": slowFile,
+		}})
+		transfer <- answer{res, err}
+	}()
+	inFlight := func() bool {
+		var started, requested bool
+		for _, e := range auditEvents(t, f.audit) {
+			if e["event"] == "command.started" && e["command_id"] != commandID {
+				started = true
+			}
+			if e["event"] == "file.downloaded" && e["stage"] == "requested" {
+				requested = true
+			}
+		}
+		return started && requested
+	}
+	if !leakcheck.Poll(20*time.Second, inFlight) {
+		t.Fatal("the two calls never got under way")
+	}
 	t.Run("happy/graceful shutdown", func(t *testing.T) {
 		r.cancel()
 		if code := r.exit(t); code != exitOK {
@@ -280,6 +331,32 @@ func TestServe(t *testing.T) {
 		if !killed {
 			t.Fatalf("the running command did not end killed: %v", events)
 		}
+		// The waiting call is answered, not cut: its command was killed, so
+		// the answer is the killed record, or the fixed shutdown text when
+		// the engine had already closed its store.
+		w, d := <-waiting, <-transfer
+		if w.err != nil {
+			t.Fatalf("waiting call: %v", w.err)
+		}
+		if w.res.IsError {
+			if txt := w.res.Content[0].(*mcp.TextContent).Text; txt != `{"code":"internal","message":"shutting down, retry later"}` {
+				t.Fatalf("waiting call: %s", txt)
+			}
+		} else if sc, _ := json.Marshal(w.res.StructuredContent); !strings.Contains(string(sc), `"status":"killed"`) {
+			t.Fatalf("waiting call: %s", sc)
+		}
+		if d.err != nil || d.res.IsError {
+			t.Fatalf("transfer: %v %+v", d.err, d.res)
+		}
+		done := false
+		for _, e := range events[:len(events)-1] {
+			if e["event"] == "file.downloaded" && e["stage"] == "done" {
+				done = true
+			}
+		}
+		if !done {
+			t.Fatalf("the transfer's done event is not before gateway.stopped: %v", events)
+		}
 	})
 	t.Run("happy/the logs hold no token, command, host or key path", func(t *testing.T) {
 		logs := r.stderr.String()
@@ -293,7 +370,7 @@ func TestServe(t *testing.T) {
 				t.Fatalf("no %q line:\n%s", msg, logs)
 			}
 		}
-		if m := r.logLine("config loaded"); m["tenants"] != float64(1) || m["servers"] != float64(1) {
+		if m := r.logLine("config loaded"); m["tenants"] != float64(1) || m["servers"] != float64(2) {
 			t.Fatalf("config loaded = %v", m)
 		}
 	})
@@ -342,6 +419,21 @@ func TestServeStartFailures(t *testing.T) {
 			t.Fatalf("stderr:\n%s", r.stderr.String())
 		}
 	})
+}
+
+// TestServeInterruptedStart: a signal during start-up is a clean exit, not
+// a start-up failure.
+func TestServeInterruptedStart(t *testing.T) {
+	f := newServeFixture(t, "127.0.0.1:0")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var errb syncBuffer
+	if code := Serve(ctx, []string{"--config", f.config}, io.Discard, &errb); code != exitOK {
+		t.Fatalf("exit = %d:\n%s", code, errb.String())
+	}
+	if strings.Contains(errb.String(), "start-up failed") {
+		t.Fatalf("logged as a failure:\n%s", errb.String())
+	}
 }
 
 func TestWatchSignals(t *testing.T) {

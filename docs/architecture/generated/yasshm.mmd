@@ -22,6 +22,11 @@ graph TB
   Edge -. "`forwards with a signed identity token`" .-> Yasshm.Http
   Yasshm.Http -. "`verifies every request`" .-> Yasshm.Auth
   Yasshm.Http -. "`dispatches tool calls`" .-> Yasshm.Tools
+  Yasshm.Http -. "`serve opens the job engine and shuts it 
+down`" .-> Yasshm.Jobs
+  Yasshm.Http -. "`serve loads the config at start`" .-> Yasshm.Config
+  Yasshm.Http -. "`serve writes gateway.started and 
+gateway.stopped`" .-> Yasshm.Audit
   Yasshm.Auth -. "`reads the identity mapping`" .-> Yasshm.Config
   Yasshm.Auth -. "`writes auth.accepted before acting and 
 auth.rejected`" .-> Yasshm.Audit

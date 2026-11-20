@@ -14,9 +14,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/InfiniteRoomLabs/yasshm/internal/audit"
@@ -165,9 +167,12 @@ type harness struct {
 	inFlight int
 	pe       *policy.Engine
 	guard    *auth.Guard
+	// decisions counts the policy decisions the gateway took.
+	decisions atomic.Int64
 
 	mu       sync.Mutex
 	sessions map[string]*mcp.ClientSession
+	schemas  map[string]*jsonschema.Resolved
 }
 
 type hopt func(h *harness, ts []tenant.Tenant)
@@ -241,7 +246,7 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	t.Cleanup(guard.Close)
 	h.guard = guard
 	h.gw, err = New(Config{
-		Version: "test", Tenants: h.tenants, Policy: pe, Jobs: h.e, Audit: h.au, Guard: guard,
+		Version: "test", Tenants: h.tenants, Policy: countingDecider{pe, &h.decisions}, Jobs: h.e, Audit: h.au, Guard: guard,
 		Health: ca, SSHOptions: testSSH, Logger: logger, MaxInFlight: h.inFlight,
 	})
 	if err != nil {
@@ -249,6 +254,17 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	}
 	h.url = serve(t, h.gw.HTTPServer())
 	return h
+}
+
+// countingDecider counts the decisions of the policy engine it wraps.
+type countingDecider struct {
+	e *policy.Engine
+	n *atomic.Int64
+}
+
+func (c countingDecider) Decide(p tenant.Principal, srv *tenant.Server, tool policy.Tool, args policy.Args) policy.Decision {
+	c.n.Add(1)
+	return c.e.Decide(p, srv, tool, args)
 }
 
 // newHarnessTenants returns the harness's two tenants without servers.
@@ -299,16 +315,12 @@ func (h *harness) tokenFor(who string) string {
 type tokenTransport struct {
 	base  http.RoundTripper
 	token func() string
-	host  string
 }
 
 func (tt tokenTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	if tok := tt.token(); tok != "" {
 		r.Header.Set(auth.Header, tok)
-	}
-	if tt.host != "" {
-		r.Host = tt.host
 	}
 	return tt.base.RoundTrip(r)
 }
@@ -368,20 +380,112 @@ func (h *harness) callErr(t *testing.T, who, tool string, args any) (*mcp.CallTo
 	// Without the test's cancellation: cleanups call tools too.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 60*time.Second)
 	defer cancel()
-	return h.session(who).CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: a})
+	res, err := h.session(who).CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: a})
+	if err == nil {
+		h.checkShape(t, tool, res)
+	}
+	return res, err
 }
 
-// text is a result's text content.
+// checkShape holds every result to the wire rules of spec 5.8: a success's
+// structured content validates against the output schema tools/list gave
+// (as a schema-validating client checks it); an error has no structured
+// content and one text block that parses to a code of the closed set.
+func (h *harness) checkShape(t *testing.T, tool string, res *mcp.CallToolResult) {
+	t.Helper()
+	if res.IsError {
+		if res.StructuredContent != nil {
+			t.Fatalf("%s: an error result carries structured content", tool)
+		}
+		parseErr(t, res)
+		return
+	}
+	schema := h.outputSchema(t, tool)
+	if schema == nil {
+		return
+	}
+	b, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(v); err != nil {
+		t.Fatalf("%s: structured content does not validate against the output schema: %v\n%s", tool, err, b)
+	}
+}
+
+// outputSchema returns the resolved output schema of tool from tools/list,
+// fetched once per harness.
+func (h *harness) outputSchema(t *testing.T, tool string) *jsonschema.Resolved {
+	t.Helper()
+	h.mu.Lock()
+	loaded := h.schemas != nil
+	h.mu.Unlock()
+	if !loaded {
+		res, err := h.session(userA).ListTools(context.WithoutCancel(t.Context()), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]*jsonschema.Resolved{}
+		for _, tl := range res.Tools {
+			b, err := json.Marshal(tl.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sc jsonschema.Schema
+			if uerr := json.Unmarshal(b, &sc); uerr != nil {
+				t.Fatal(uerr)
+			}
+			r, err := sc.Resolve(nil)
+			if err != nil {
+				t.Fatalf("%s: %v", tl.Name, err)
+			}
+			m[tl.Name] = r
+		}
+		h.mu.Lock()
+		h.schemas = m
+		h.mu.Unlock()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.schemas[tool]
+}
+
+// blocks is a result's text blocks.
+func blocks(t *testing.T, r *mcp.CallToolResult) []string {
+	t.Helper()
+	out := make([]string, 0, len(r.Content))
+	for _, c := range r.Content {
+		tc, ok := c.(*mcp.TextContent)
+		if !ok {
+			t.Fatalf("content is %T", c)
+		}
+		out = append(out, tc.Text)
+	}
+	return out
+}
+
+// text is a result's first text block, the gateway's own.
 func text(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
-	if len(r.Content) != 1 {
-		t.Fatalf("content blocks = %d", len(r.Content))
+	b := blocks(t, r)
+	if len(b) == 0 {
+		t.Fatal("no content")
 	}
-	tc, ok := r.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("content is %T", r.Content[0])
+	return b[0]
+}
+
+// strictDecode decodes JSON b into dst, refusing unknown fields.
+func strictDecode(t *testing.T, b []byte, dst any) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		t.Fatalf("decoding %s: %v", b, err)
 	}
-	return tc.Text
 }
 
 // decode decodes a successful result's structured content into dst.
@@ -394,11 +498,26 @@ func decode(t *testing.T, r *mcp.CallToolResult, dst any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		t.Fatalf("structured content %s: %v", b, err)
+	strictDecode(t, b, dst)
+}
+
+// parseErr parses an error result's one text block: one line of JSON
+// {code, message, rule?} with a code of the closed set.
+func parseErr(t *testing.T, r *mcp.CallToolResult) ToolError {
+	t.Helper()
+	b := blocks(t, r)
+	if len(b) != 1 || strings.Contains(b[0], "\n") {
+		t.Fatalf("error blocks = %q", b)
 	}
+	var e ToolError
+	strictDecode(t, []byte(b[0]), &e)
+	if !slices.Contains(Codes, e.Code) || len(Codes) != 10 || e.Message == "" {
+		t.Fatalf("code %q is not one of the ten of spec 5.8", e.Code)
+	}
+	if b[0] != e.Error() {
+		t.Fatalf("text %q is not the error's one-line form", b[0])
+	}
+	return e
 }
 
 // wantErr asserts r is a tool error with code (and rule when given) and
@@ -408,24 +527,12 @@ func wantErr(t *testing.T, r *mcp.CallToolResult, code, rule string) ToolError {
 	if !r.IsError {
 		t.Fatalf("want error %s, got success: %s", code, text(t, r))
 	}
-	var e ToolError
-	b, err := json.Marshal(r.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
+	if r.StructuredContent != nil {
+		t.Fatal("an error result carries structured content")
 	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&e); err != nil {
-		t.Fatalf("error content %s: %v", b, err)
-	}
-	if !slices.Contains(Codes, e.Code) || len(Codes) != 10 {
-		t.Fatalf("code %q is not one of the ten of spec 5.8", e.Code)
-	}
+	e := parseErr(t, r)
 	if e.Code != code || (rule != "" && e.Rule != rule) {
 		t.Fatalf("error = %+v, want code %s rule %q", e, code, rule)
-	}
-	if text(t, r) != e.Error() {
-		t.Fatalf("text %q does not render the error %+v", text(t, r), e)
 	}
 	return e
 }
@@ -442,8 +549,7 @@ func (h *harness) run(t *testing.T, who, server, command string, extra map[strin
 	return r
 }
 
-// events returns the names of the audit events with request id rid, or of
-// every event when rid is empty.
+// events returns the names of the audit events that match.
 func (h *harness) events(t *testing.T, match func(auditLine) bool) []string {
 	t.Helper()
 	var out []string

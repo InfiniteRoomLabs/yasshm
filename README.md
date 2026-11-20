@@ -33,12 +33,14 @@ mise run check
 
 ```sh
 install -d -m 0700 /tmp/yasshm-data
+# The version is what the binary was stamped with: the short commit for a
+# `mise run build` binary (for example "1d3b63c"), "dev" for `go run`.
 # config.yaml as in spec section 5.1, with
 #   listen: 127.0.0.1:8822, data_dir: /tmp/yasshm-data, audit_log: /tmp/yasshm-audit.jsonl
 yasshm config check --config config.yaml
 yasshm serve --config config.yaml 2>serve.log &
-curl -s http://127.0.0.1:8822/healthz   # {"status":"ok","version":"dev"} once the key set is loaded
-curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8822/mcp   # 401: no token
+curl -s 'http://127.0.0.1:8822/healthz'   # {"status":"ok","version":"<the build's version>"} once the key set is loaded
+curl -s -o /dev/null -w '%{http_code}\n' -X POST 'http://127.0.0.1:8822/mcp'   # 401: no token
 kill -TERM %1                            # graceful: gateway.stopped in the audit log
 ```
 

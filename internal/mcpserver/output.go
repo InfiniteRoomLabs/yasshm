@@ -15,7 +15,7 @@ func jsonCost(r rune) int {
 	switch {
 	case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
 		return 2
-	case r < 0x20 || r == '<' || r == '>' || r == '&' || r == ' ' || r == ' ' || r == utf8.RuneError:
+	case r < 0x20 || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029' || r == utf8.RuneError:
 		return 6
 	default:
 		return utf8.RuneLen(r)
@@ -58,9 +58,6 @@ func fitText(data []byte, budget int, final bool) textPage {
 			break
 		}
 		r, size := utf8.DecodeRune(rest)
-		if r == utf8.RuneError && size <= 1 {
-			size = 1
-		}
 		c := jsonCost(r)
 		if cost+c > budget {
 			break

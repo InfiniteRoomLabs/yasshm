@@ -49,7 +49,9 @@ var limitTable = []limitSpec{
 	// JSON around it, so 1 MiB is the most that fits.
 	{"max_upload_bytes", 1 * mib, 1, 1 * mib, func(l *tenant.Limits) *int64 { return &l.MaxUploadBytes }},
 	{"kill_grace_seconds", 5, 1, 60, func(l *tenant.Limits) *int64 { return &l.KillGraceSeconds }},
-	{"connect_timeout_seconds", 10, 1, 120, func(l *tenant.Limits) *int64 { return &l.ConnectTimeoutSeconds }},
+	// At most 59: run_command's start can take twice this (the connect and
+	// the exec reply) before its wait, and MaxToolSeconds bounds the sum.
+	{"connect_timeout_seconds", 10, 1, 59, func(l *tenant.Limits) *int64 { return &l.ConnectTimeoutSeconds }},
 	{"shutdown_grace_seconds", 20, 1, 300, func(l *tenant.Limits) *int64 { return &l.ShutdownGraceSeconds }},
 }
 
@@ -73,6 +75,12 @@ var limitPairs = []limitPair{
 	{"max_concurrent_per_server", "max_concurrent_commands"},
 	{"max_output_bytes", "max_data_bytes"},
 }
+
+// MaxToolSeconds bounds the longest a run_command may take to answer:
+// max_wait_seconds plus twice connect_timeout_seconds (the connect and the
+// exec reply before the wait). It stays under the edge's 125-second proxy
+// read timeout (F15) with room for reading the output; the defaults give 80.
+const MaxToolSeconds = 120
 
 func limitByKey(key string) limitSpec {
 	for _, s := range limitTable {
